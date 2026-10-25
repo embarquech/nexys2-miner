@@ -24,7 +24,8 @@ hashrate changes apply to stock ESP-Miner; the `/api/system/cores` hunk in
   - on each job, builds the 80-byte header, computes the midstate and the state
     after rounds 0-2, and sends the 84-byte job with one `J` command;
   - polls for hits every 20 ms, re-hashes each one, counts wrong hashes (logged
-    every 1000 hits) and passes hashes with 26+ leading zero bits to ESP-Miner;
+    every 1000 hits) and passes hashes with 24+ leading zero bits to ESP-Miner
+    (one every ~5 s: it fills the Shares page);
   - reads the FPGA's nonce counter once a second for the hash rate;
   - finds the FPGA at boot, and swaps TX/RX itself if the wires are crossed;
   - switches the board's LEDs and display with the `fpgaLightsOff` setting.

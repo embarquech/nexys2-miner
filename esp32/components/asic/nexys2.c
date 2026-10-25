@@ -41,11 +41,11 @@ static const char *TAG = "nexys2";
 // The FPGA flags hashes whose top FPGA_HIT_BITS bits are zero (fixed in the
 // UART bitstream, ~3 hits/s). Every one is re-hashed here, which keeps a
 // running count of wrong hashes (an overclock that has gone too far), and only
-// those with HIT_BITS or more go on to ESP-Miner: one every ~20 s at 3 MH/s,
-// enough to show life on the dashboard.
+// those with HIT_BITS or more go on to ESP-Miner: at 24, one every ~5 s at
+// 3.4 MH/s, enough to fill the Shares page without flooding it.
 #define FPGA_HIT_BITS 20
 #ifndef HIT_BITS
-#define HIT_BITS 26
+#define HIT_BITS 24
 #endif
 
 #define POLL_MS 20

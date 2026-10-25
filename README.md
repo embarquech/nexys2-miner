@@ -29,7 +29,7 @@ first 64 bytes, the same for every nonce) and the state after **rounds 0-2** of
 the second block (they only see header bytes 64..75), and sends an 84-byte job.
 The FPGA only does the nonce-dependent work and reports back nonces whose hash
 has 20 leading zero bits. The ESP32 re-hashes each one, keeps a running count of
-wrong hashes, and passes the ones with 26 or more zero bits to ESP-Miner, which
+wrong hashes, and passes the ones with 24 or more zero bits to ESP-Miner, which
 submits those that meet the pool difficulty.
 
 ### The hashing unit (`hdl/miner_unit.vhd`, `hdl/sha256_core_csa.vhd`)
