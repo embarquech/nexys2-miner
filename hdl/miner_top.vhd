@@ -16,10 +16,13 @@
 --   0x39       R   bit0 = running, bit1 = hit pending
 --   0x3A       W   any value clears the pending hit
 --   0x3B       RW  bit0 = LEDs and 7-segment display off (dark mode)
---   0x40-0x43  R   nonce word of the pending hit, plus NCORES (it is the unit's
---                  counter, read the clock after it stepped past the hit)
---   0x44-0x47  R   nonce word unit 0 is hashing (0x44 snapshots all four)
+--   0x40-0x43  R   nonce word of the pending hit, plus the stride (it is the
+--                  unit's counter, read the clock after it stepped past the hit)
+--   0x44-0x47  R   nonce word unit 0 is hashing (0x44 snapshots all four);
+--                  NCORES nonces are done each time it advances by the stride
 --   0x48       R   hits since restart (wraps; USB link only)
+--   0x4D       R   nonce stride: NCORES rounded up to a power of two (unit i
+--                  hashes i, i + stride, ...; 0 on older bitstreams)
 --   0x4E       R   magic: 0xB7 (84-byte job), 0xB8 (76-byte job, UART link)
 --   0x4F       R   NCORES
 -- The job is write-only; 0x3B reads back. The UART protocol is in
@@ -36,7 +39,9 @@ entity miner_top is
     CLK_DIV : positive := 5;
     HOST_UART : boolean := false;                  -- false: USB/DEPP, true: UART
     UART_BAUD : positive := 921_600;
-    SHOW_RATE : boolean := true);                  -- 7-segment display and LEDs
+    SHOW_RATE : boolean := true;                   -- 7-segment display and LEDs
+    CSA       : boolean := true;                   -- carry-save round (see sha256_core)
+    HYBRID    : boolean := false);
   port (
     clk50   : in    std_logic;                     -- board oscillator
     EppAstb : in    std_logic;
@@ -54,6 +59,19 @@ end entity;
 
 architecture rtl of miner_top is
   constant CLK_HZ   : positive := 50_000_000 / CLK_DIV * CLK_MUL;
+  -- Units hash i, i + STEP, ... with STEP a power of two, so a unit's nonce is
+  -- the master's with its number in the low bits (5 units leave 3 of every 8
+  -- nonces unhashed: a job is replaced long before its 2^32 nonces run out).
+  function step_bits_f return natural is
+    variable b : natural := 0;
+  begin
+    while 2 ** b < NCORES loop
+      b := b + 1;
+    end loop;
+    return b;
+  end;
+  constant STEP_BITS : natural := step_bits_f;
+  constant STEP      : positive := 2 ** STEP_BITS;
   signal clk        : std_logic;
   signal dcm_locked : std_logic;
   type byte_array is array (natural range <>) of std_logic_vector(7 downto 0);
@@ -103,6 +121,19 @@ architecture rtl of miner_top is
   type kidx_array is array (0 to NCORES - 1) of unsigned(5 downto 0);
   signal kidxs       : kidx_array;
   signal k_shared    : unsigned(31 downto 0) := (others => '0');
+  signal mid_e       : unsigned(31 downto 0) := (others => '0');
+  -- Round 0 of pass 2 on the IV, with the midstate words it adds folded in
+  -- once per job (see sha256_core)
+  function iv_w(i : natural) return unsigned is
+  begin
+    return IV(255 - 32 * i downto 224 - 32 * i);
+  end;
+  constant T1_IV   : unsigned(31 downto 0) := iv_w(7) + bsig1(iv_w(4)) + ch(iv_w(4), iv_w(5), iv_w(6)) + K(0);
+  constant A1_IV   : unsigned(31 downto 0) := T1_IV + bsig0(iv_w(0)) + maj(iv_w(0), iv_w(1), iv_w(2));
+  constant E1_IV   : unsigned(31 downto 0) := iv_w(3) + T1_IV;
+  constant HK1_IV  : unsigned(31 downto 0) := iv_w(6) + K(1);    -- h after round 0 is IV g
+  constant DHK1_IV : unsigned(31 downto 0) := iv_w(2) + HK1_IV;  -- and d is IV c
+  signal a1m, e1m, hk1m, dhk1m : unsigned(31 downto 0) := (others => '0');
   signal nonces      : nonce_array(0 to NCORES - 1);
   type ctl_array is array (0 to NCORES - 1) of unit_ctl_t;
   signal ctls        : ctl_array;
@@ -155,31 +186,34 @@ begin
   state3   <= unsigned(job(255 downto 0));
 
   ---------------------------------------------------------------------------
-  -- Hashing units: unit i hashes first + i, first + i + NCORES, ...
+  -- Hashing units: unit i hashes first + i, first + i + STEP, ...
   ---------------------------------------------------------------------------
   g_units : for i in 0 to NCORES - 1 generate
-    -- With 4 units and a first nonce word that is a multiple of 4 (the hosts
-    -- always send one), first + i is just i in the low two bits: no adders.
+    -- With a first nonce word that is a multiple of STEP (the hosts always
+    -- send one), first + i is just i in the low bits: no adders.
     -- The ESP32 always starts a job at nonce 0, so with the UART link the
     -- first nonce is a constant and no unit needs a 32-bit reload mux.
     g_fixed : if HOST_UART generate
       firsts(i) <= to_unsigned(i, 32);
     end generate;
-    g_wire : if not HOST_UART and NCORES = 4 generate
-      firsts(i) <= first(31 downto 2) & to_unsigned(i, 2);
+    g_wire : if not HOST_UART generate
+      firsts(i) <= first(31 downto STEP_BITS) & to_unsigned(i, STEP_BITS);
     end generate;
-    g_add : if not HOST_UART and NCORES /= 4 generate
-      firsts(i) <= first + i;            -- VHDL-93: no expressions in port maps
-    end generate;
-    -- With 4 units, unit 0 runs the round counters and state machine for
-    -- all of them (they are in lockstep anyway): ~50 slices per follower.
+    -- Unit 0 runs the round counters and state machine for all of them
+    -- (they are in lockstep anyway): ~50 slices per follower.
     u : entity work.miner_unit
-      generic map (STEP => NCORES, MASTER => i = 0 or NCORES /= 4, UNIT => i)
+      generic map (STEP => STEP, STEP_BITS => STEP_BITS, MASTER => i = 0, UNIT => i, CSA => CSA,
+                   HYBRID => HYBRID)
       port map (
         clk       => clk,
         restart   => restart,
         enable    => enable,
         midstate  => midstate,
+        mid_e     => mid_e,
+        a1m       => a1m,
+        e1m       => e1m,
+        hk1m      => hk1m,
+        dhk1m     => dhk1m,
         state3    => state3,
         hk3       => hk3,
         dhk3      => dhk3,
@@ -203,6 +237,20 @@ begin
     if rising_edge(clk) then
       k_q      <= KROM(to_integer(kidxs(0)));
       hk3      <= state3(31 downto 0) + K(3);
+      a1m      <= A1_IV + midstate(255 downto 224);
+      e1m      <= E1_IV + midstate(255 downto 224);
+      hk1m     <= HK1_IV + midstate(223 downto 192);
+      dhk1m    <= DHK1_IV + midstate(223 downto 192);
+      -- The midstate word the cores add to the e value they store in the
+      -- next clock (see sha256_core): words 7, 6, 5, 4 in pass 1's rounds 61,
+      -- 62, 63 and the load clock after them, so after rounds 60..63 here.
+      -- Only the round counter's low bits, a register, pick it.
+      case to_integer(ctls(0).core.t(1 downto 0)) is
+        when 0      => mid_e <= midstate(31 downto 0);      -- word 7
+        when 1      => mid_e <= midstate(63 downto 32);     -- word 6
+        when 2      => mid_e <= midstate(95 downto 64);     -- word 5
+        when others => mid_e <= midstate(127 downto 96);    -- word 4
+      end case;
       dhk3     <= state3(159 downto 128) + state3(31 downto 0) + K(3);
     end if;
   end process;
@@ -290,6 +338,7 @@ begin
       when 16#46# => rd := std_logic_vector(snap(15 downto 8));
       when 16#47# => rd := std_logic_vector(snap(7 downto 0));
       when 16#48# => rd := std_logic_vector(hit_count);
+      when 16#4D# => rd := std_logic_vector(to_unsigned(STEP, 8));
       when 16#4E# =>
         if HOST_UART then
           rd := x"B8";

@@ -5,6 +5,9 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity tb_top is
+  generic (NCORES : positive := 4;            -- 5 also covers unit 4 and a stride of 8
+           CSA    : boolean := true;
+           HYBRID : boolean := false);
 end entity;
 
 architecture sim of tb_top is
@@ -16,6 +19,15 @@ architecture sim of tb_top is
     x"de8459101f8aee5cb7f888dfbc909a33238956e3af5e1cbaa8a8881cc3c8d8e9";
   constant WINNER   : unsigned(31 downto 0) := x"1dac2b7c";
   constant FIRST_W  : std_logic_vector(31 downto 0) := std_logic_vector(WINNER - 40);
+  -- nonce stride: NCORES rounded up to a power of two; WINNER is 4 mod 8, so
+  -- unit 4 finds it with 5 units
+  function stride return natural is
+  begin
+    if NCORES <= 4 then
+      return 4;
+    end if;
+    return 8;
+  end;
 
   signal clk     : std_logic := '0';
   signal astb    : std_logic := '1';
@@ -29,7 +41,7 @@ begin
   clk <= not clk after 10 ns when not stop_clk;
 
   dut : entity work.miner_top
-    generic map (NCORES => 4)
+    generic map (NCORES => NCORES, CSA => CSA, HYBRID => HYBRID)
     port map (clk50 => clk, EppAstb => astb, EppDstb => dstb, EppWr => wr,
               EppWait => wt, EppDB => db, UartRx => '1', UartTx => open, Btn => "0000", Seg => open, An => open,
               Led => led);
@@ -86,6 +98,8 @@ begin
     assert b = x"B7" report "bad magic" severity failure;
     get(16#4F#, b);
     report "NCORES = " & integer'image(to_integer(unsigned(b)));
+    get(16#4D#, b);
+    assert to_integer(unsigned(b)) = stride report "bad stride" severity failure;
 
     -- job port: midstate, tail, first, mask, state3, all to address 0
     for i in 0 to 31 loop
@@ -115,7 +129,7 @@ begin
     get32(16#40#, n);
     report "hit nonce word = " & integer'image(to_integer(n(31 downto 16))) & ":" &
            integer'image(to_integer(n(15 downto 0)));
-    assert n = WINNER + 4 report "WRONG nonce" severity failure;
+    assert n = WINNER + stride report "WRONG nonce" severity failure;
     get32(16#44#, n);
     assert n > WINNER - 40 report "progress did not advance" severity failure;
     get(16#48#, b);

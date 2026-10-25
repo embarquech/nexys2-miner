@@ -157,10 +157,10 @@ index 00000000..c8fbbb03
 +#endif /* NEXYS2_H_ */
 diff --git a/components/asic/nexys2.c b/components/asic/nexys2.c
 new file mode 100644
-index 00000000..7d5a36c7
+index 00000000..03435103
 --- /dev/null
 +++ b/components/asic/nexys2.c
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,465 @@
 +#include "nexys2.h"
 +
 +#include "global_state.h"
@@ -193,6 +193,7 @@ index 00000000..7d5a36c7
 +#define REG_LIGHTS   0x3B
 +#define REG_FOUND    0x40
 +#define REG_PROGRESS 0x44
++#define REG_STRIDE   0x4D     // nonce stride (0 on older bitstreams: = units)
 +#define REG_MAGIC    0x4E
 +#define MAGIC        0xB7     // 84-byte job (first nonce word and hit mask)
 +#define MAGIC_SHORT  0xB8     // 76-byte job: nonce 0 and 20-bit mask built in
@@ -217,6 +218,8 @@ index 00000000..7d5a36c7
 +
 +static SemaphoreHandle_t fpga_lock;
 +static uint8_t ncores;
++static uint8_t stride;            // unit i hashes nonce words i, i + stride, ...
++static int baud = NEXYS2_BAUD;    // the FPGA's actual baud rate, see find_fpga()
 +static uint8_t job_id;
 +static uint32_t job_version;
 +static bool job_loaded;
@@ -342,51 +345,93 @@ index 00000000..7d5a36c7
 +// ASIC driver interface
 +// --------------------------------------------------------------------------
 +
-+uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE)
++// Read the magic at the current baud rate, GPIO17 TX / GPIO18 RX first, then
++// swapped. Caller holds fpga_lock.
++static bool probe_pins(uint8_t id[2])
 +{
-+    if (fpga_lock == NULL) {
-+        fpga_lock = xSemaphoreCreateMutex();
-+    }
-+
-+    SERIAL_set_baud(NEXYS2_BAUD);
 +    SERIAL_clear_buffer();
 +    // Bytes other than a command are ignored, so this ends any half-sent command.
 +    uint8_t idle[4] = {0xFF, 0xFF, 0xFF, 0xFF};
 +    SERIAL_send(idle, sizeof(idle), false);
 +    vTaskDelay(pdMS_TO_TICKS(10));
 +    SERIAL_clear_buffer();
++    if (fpga_read(REG_MAGIC, id, 2) && (id[0] == MAGIC || id[0] == MAGIC_SHORT)) {
++        return true;
++    }
++    // TX and RX crossed the wrong way round is the usual wiring slip; the
++    // pins are only a mux setting on the ESP32, so try them swapped.
++    // Detach both first: uart_set_pin() leaves GPIO17 routed to TX as
++    // well, which would drive against the FPGA's TX and echo our bytes.
++    gpio_reset_pin(17);
++    gpio_reset_pin(18);
++    uart_set_pin(UART_NUM_1, 18, 17, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
++    vTaskDelay(pdMS_TO_TICKS(10));
++    SERIAL_clear_buffer();
++    if (fpga_read(REG_MAGIC, id, 2) && (id[0] == MAGIC || id[0] == MAGIC_SHORT)) {
++        ESP_LOGW(TAG, "found with GPIO18 TX / GPIO17 RX: the wires are crossed, it works anyway");
++        return true;
++    }
++    gpio_reset_pin(17);
++    gpio_reset_pin(18);
++    uart_set_pin(UART_NUM_1, 17, 18, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
++    return false;
++}
++
++// The FPGA's UART divider is fixed for the clock the bitstream was built for
++// (103.3 MHz). A bitstream re-clocked through its DCM (ise/refreq.sh) keeps
++// that divider, so its baud rate scales with the clock: if 921600 gets no
++// answer, try the rates of other clocks, 1 MHz apart (a UART tolerates ~3 %).
++static bool find_fpga(uint8_t id[2])
++{
++    baud = NEXYS2_BAUD;
++    SERIAL_set_baud(baud);
++    if (probe_pins(id)) {
++        return true;
++    }
++    ESP_LOGW(TAG, "no answer at %d baud, scanning for a re-clocked bitstream", baud);
++    for (int mhz = 110; mhz >= 50; mhz--) {
++        int b = (int)((int64_t)NEXYS2_BAUD * mhz * 3 / 310);   // built for 310/3 MHz
++        if (mhz == 103) {
++            continue;
++        }
++        SERIAL_set_baud(b);
++        if (probe_pins(id)) {
++            baud = b;
++            ESP_LOGW(TAG, "found at %d baud: FPGA clock about %d MHz", b, mhz);
++            return true;
++        }
++    }
++    baud = NEXYS2_BAUD;
++    SERIAL_set_baud(baud);
++    return false;
++}
++
++uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE)
++{
++    if (fpga_lock == NULL) {
++        fpga_lock = xSemaphoreCreateMutex();
++    }
 +
 +    uint8_t id[2] = {0};
 +    xSemaphoreTake(fpga_lock, portMAX_DELAY);
-+    bool ok = fpga_read(REG_MAGIC, id, 2) && (id[0] == MAGIC || id[0] == MAGIC_SHORT);
-+    if (!ok) {
-+        // TX and RX crossed the wrong way round is the usual wiring slip; the
-+        // pins are only a mux setting on the ESP32, so try them swapped.
-+        ESP_LOGW(TAG, "no answer on GPIO17 TX / GPIO18 RX, trying them swapped");
-+        // Detach both first: uart_set_pin() leaves GPIO17 routed to TX as
-+        // well, which would drive against the FPGA's TX and echo our bytes.
-+        gpio_reset_pin(17);
-+        gpio_reset_pin(18);
-+        uart_set_pin(UART_NUM_1, 18, 17, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-+        vTaskDelay(pdMS_TO_TICKS(10));
-+        SERIAL_clear_buffer();
-+        ok = fpga_read(REG_MAGIC, id, 2) && (id[0] == MAGIC || id[0] == MAGIC_SHORT);
-+        if (ok) {
-+            ESP_LOGW(TAG, "found with GPIO18 TX / GPIO17 RX: the wires are crossed, it works anyway");
-+        } else {
-+            gpio_reset_pin(17);
-+            gpio_reset_pin(18);
-+            uart_set_pin(UART_NUM_1, 17, 18, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-+        }
-+    }
++    bool ok = find_fpga(id);
 +    xSemaphoreGive(fpga_lock);
 +    if (!ok) {
 +        ESP_LOGE(TAG, "Nexys2 not found on UART1 (read %02X %02X): check the UART bitstream and wiring", id[0], id[1]);
 +        return 0;
 +    }
 +    ncores = id[1];
++    // 5 units step by 8 (the unit number sits in the low bits), so the nonce
++    // counter and the unit count no longer match
++    uint8_t st = 0;
++    xSemaphoreTake(fpga_lock, portMAX_DELAY);
++    bool st_ok = fpga_read(REG_STRIDE, &st, 1);
++    xSemaphoreGive(fpga_lock);
++    stride = (st_ok && st >= ncores) ? st : ncores;
++    GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count = ncores;
++    GLOBAL_STATE->DEVICE_CONFIG.family.asic.small_core_count = ncores;
 +    short_job = id[0] == MAGIC_SHORT;
-+    ESP_LOGI(TAG, "Nexys2 FPGA miner found, %u hashing units", ncores);
++    ESP_LOGI(TAG, "Nexys2 FPGA miner found, %u hashing units, nonce stride %u", ncores, stride);
 +
 +    NEXYS2_set_lights(!nvs_config_get_bool(NVS_CONFIG_FPGA_LIGHTS_OFF));
 +
@@ -396,7 +441,7 @@ index 00000000..7d5a36c7
 +
 +int NEXYS2_set_max_baud(void)
 +{
-+    return NEXYS2_BAUD;
++    return baud;
 +}
 +
 +void NEXYS2_set_lights(bool on)
@@ -501,7 +546,7 @@ index 00000000..7d5a36c7
 +
 +        if (hit) {
 +            // the FPGA reports the unit's counter, already one step past the hit
-+            uint32_t w = be32(word) - ncores;
++            uint32_t w = be32(word) - stride;
 +            put_be32(word, w);
 +
 +            // Re-hash: an overclocked FPGA can return wrong nonces, and the
@@ -523,7 +568,7 @@ index 00000000..7d5a36c7
 +            }
 +            if (!good) {
 +                ESP_LOGW(TAG, "bad hit 0x%08" PRIX32 " from unit %d: the FPGA clock may be too fast",
-+                         w, ncores ? (int)(w % ncores) : 0);
++                         w, stride ? (int)(w % stride) : 0);
 +                vTaskDelay(pdMS_TO_TICKS(POLL_MS));
 +                continue;
 +            }
@@ -537,7 +582,7 @@ index 00000000..7d5a36c7
 +            result.nonce = __builtin_bswap32(w);
 +            result.rolled_version = hit_version;    // the FPGA does not roll versions
 +            result.asic_nr = 0;
-+            result.core_id = ncores ? w % ncores : 0; // unit i hashes words i, i + n, ...
++            result.core_id = stride ? w % stride : 0; // unit i hashes words i, i + stride, ...
 +            result.timestamp_us = esp_timer_get_time();
 +            return &result;
 +        }
@@ -558,8 +603,8 @@ index 00000000..7d5a36c7
 +        return;
 +    }
 +
-+    // Unit 0's nonce word advances by the unit count each time every unit
-+    // finishes a nonce, so from 0 it equals the total nonces hashed.
++    // Unit 0's nonce word advances by the stride each time every unit
++    // finishes a nonce: ncores nonces hashed per stride.
 +    uint32_t progress = be32(word);
 +    int64_t now = esp_timer_get_time();
 +    uint32_t hashes;
@@ -578,7 +623,7 @@ index 00000000..7d5a36c7
 +        return;
 +    }
 +
-+    uint32_t hps = (uint32_t)((uint64_t)hashes * 1000000ULL / (uint64_t)elapsed);
++    uint32_t hps = (uint32_t)((uint64_t)hashes * ncores * 1000000ULL / ((uint64_t)elapsed * (stride ? stride : 1)));
 +    hashrate_monitor_register_read(GLOBAL_STATE, REGISTER_HASHRATE_HPS, 0, hps, now);
 +}
 diff --git a/config-nexys2.cvs b/config-nexys2.cvs

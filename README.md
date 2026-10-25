@@ -11,17 +11,17 @@ times slower than a single Bitaxe Gamma, so this is a project about pushing a
 
 | | |
 |---|---|
-| Hash rate | **3.48 MH/s** (4 units x 106.25 MHz / 122 clocks per nonce) |
-| Error rate | 0 wrong hashes over the bench runs (every hit is re-hashed by the ESP32) |
-| Device use | 98 % of slices, 86 % of LUTs |
+| Hash rate | **4.10 MH/s** (5 units x 100 MHz / 122 clocks per nonce) |
+| Error rate | ~0.5 % wrong hashes, re-hashed and dropped by the ESP32 |
+| Device use | 94 % of slices, 82 % of LUTs, 6 of 20 block RAMs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
 
 ## How it works
 
 ```
 pool <-stratum-> ESP32-S3 (ESP-Miner + nexys2 driver) <-UART 921600-> FPGA
-                  midstate, rounds 0-2 precomputed          4 hashing units
-                  re-hashes every hit                         sha256_core_csa
+                  midstate, rounds 0-2 precomputed          5 hashing units
+                  re-hashes every hit                         sha256_core
 ```
 
 The ESP32 builds each block header, computes the **midstate** (SHA-256 of the
@@ -32,9 +32,9 @@ has 20 leading zero bits. The ESP32 re-hashes each one, keeps a running count of
 wrong hashes, and passes the ones with 24 or more zero bits to ESP-Miner, which
 submits those that meet the pool difficulty.
 
-### The hashing unit (`hdl/miner_unit.vhd`, `hdl/sha256_core_csa.vhd`)
+### The hashing unit (`hdl/miner_unit.vhd`, `hdl/sha256_core.vhd`)
 
-Each of the 4 units runs both SHA-256 passes on one iterative core, one round
+Each of the 5 units runs both SHA-256 passes on one iterative core, one round
 per clock, **122 clocks per nonce**:
 
 - **pass 1** starts at round 3 from the precomputed state (61 rounds); its load
@@ -42,26 +42,35 @@ per clock, **122 clocks per nonce**:
 - **pass 2** starts from the SHA-256 IV, so round 0 is folded into its load
   clock, and it **stops after round 60**: only H7 is needed for the target
   test, and e after round 60 is what h would be after round 63 (61 clocks);
-- no feed-forward clock: the state is captured with the last round, the
-  midstate added on the way;
-- **carry-save adders**: each round ends in a single carry chain for `a` and
-  one for `e`; `h+K+W` and `d+h+K+W` are computed one round ahead;
+- **pass 1's hash is never captured**: its words are the last four values of
+  `a` and `e`, written into a block RAM two per clock (one per port) as they
+  leave the last rounds, midstate added on the way in; pass 2 reads them back
+  as message words. This replaced a 256-bit register, six adders and a word
+  mux per unit, and is what made room for a fifth unit;
+- the round has two carry chains for `a` (T1, then T1 + T2), ~250 LUTs per
+  unit smaller than the carry-save round (`csa`, one chain each for `a` and
+  `e`, which the 4-unit builds used); `h+K+W` is computed one round ahead, and
+  pass 2's round-0 sums with the midstate once per job;
 - the message schedule lives in a delay line that maps to SRL16s, and the
   words a pass skips (W0-W2) are injected into it just before the rounds that
   tap them;
 - the units run in lockstep, so unit 0 owns the round counter, state machine
-  and nonce counter for all four, and one K table in block RAM serves them all
-  (XST does not merge identical registers across units by itself: sharing them
-  by hand saved ~600 LUTs and ~240 flip-flops);
-- the units split the nonce space: unit *i* hashes *i*, *i*+4, *i*+8, ...
+  and nonce counter for all of them, and one K table in block RAM serves them
+  all (XST does not merge identical registers across units by itself: sharing
+  them by hand saved ~600 LUTs and ~240 flip-flops). Selects that sit in front
+  of adders are per-unit registers instead: as shared logic they became nets
+  with a fanout of 500;
+- the units split the nonce space with a stride of 8: unit *i* hashes *i*,
+  *i*+8, ... (3 nonces in 8 are skipped; a job is replaced long before its
+  2^32 nonces run out).
 
 ### Clock
 
-The core clock comes from a DCM: 50 MHz x 17 / 8 = **106.25 MHz**. The timing
-tools only guarantee 77.6 MHz worst case (slowest silicon, 85 degC); the real
-chip at room temperature runs 106.25 MHz without errors (0 in 900 hits) and
-starts failing just above (0.4 % at 106.7, 1.7 % at 107.7, 2.4 % at 108.3).
-Two tricks get there:
+The core clock comes from a DCM: 50 MHz x 2 = **100 MHz**. The timing tools
+only guarantee 67.4 MHz worst case (slowest silicon, 85 degC); the real chip at
+room temperature runs 100 MHz with ~0.5 % wrong hashes, 103.3 MHz with ~8 %.
+The 4-unit carry-save build (77.6 MHz worst case) ran 106.25 MHz without errors,
+3.48 MH/s. Two tricks get there:
 
 - `ise/build.sh` can tell PAR the input clock is slower than it is (the
   `ts_ns` argument). Asked for the true target, PAR gives up and places far
@@ -70,9 +79,10 @@ Two tricks get there:
 - the design is built at 31/15 (103.3 MHz), then
   `ise/refreq.sh` changes only the DCM multiplier/divider of the placed and
   routed design (through XDL): the same placement measured at several
-  frequencies, and the shipped one re-clocked to 17/8 (`prom` also writes the
-  PROM file). The UART divider still assumes 103.3 MHz, so the link runs 2.8 %
-  fast (947 kbaud), well within what a UART tolerates.
+  frequencies, and the shipped one re-clocked to 2/1 (`prom` also writes the
+  PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
+  the same ratio; the ESP32 driver scans for the baud rate if 921600 gets no
+  answer, so any re-clocked bitstream works.
 
 PAR seeds matter: on the same design, the wrong-hash rate at 103 MHz ranged
 from 0 % to 33 % depending on the seed. The shipped bitstream is the best of
@@ -82,8 +92,8 @@ several (77.6 MHz worst case per the timing report, 0 wrong hashes at 103 MHz).
 
 | Path | |
 |---|---|
-| `hdl/` | VHDL-93 for XST. `miner_top.vhd` (register bus, host link, units), `miner_unit.vhd`, `sha256_core_csa.vhd` (carry-save, 122 clocks, shipped), `sha256_core.vhd` (two carry chains, 123 clocks, smaller), `uart_bridge.vhd`, `rate_display.vhd` (7-segment hash rate, optional), `clkgen_dcm.vhd`, `nexys2.ucf`, `ja_probe.vhd` (wiring probe) |
-| `sim/` | GHDL testbenches: `tb_top` (USB host, genesis block), `tb_uart` (UART host, as the ESP32 does it), `tb_display` |
+| `hdl/` | VHDL-93 for XST. `miner_top.vhd` (register bus, host link, units), `miner_unit.vhd`, `sha256_core.vhd` (the core; generics `CSA`/`HYBRID` pick the round's arithmetic), `uart_bridge.vhd`, `rate_display.vhd` (7-segment hash rate, optional), `clkgen_dcm.vhd`, `nexys2.ucf`, `ja_probe.vhd` (wiring probe) |
+| `sim/` | GHDL testbenches: `tb_top` (USB host, genesis block), `tb_uart` (UART host, as the ESP32 does it), `tb_display`; `ramb16_sim.vhd` models the block RAM primitive |
 | `sw/` | Python host for a PC over USB: `miner.py` (stratum client, self-test, stress test), `fpga.py`, `jtagprog.py` (load a `.bit` over JTAG), `svfplay.py` (play an SVF, used to write the PROM), `cpu_miner.py` |
 | `ise/` | `build.sh` (command-line ISE flow), `refreq.sh`, `probe.sh`, `sites.sh`, `geom.sh`, floorplan experiments |
 | `esp32/` | The ESP-Miner changes: patch, driver sources, NVS config template |
@@ -121,8 +131,9 @@ that VM under Windows 11 with Hyper-V/VBS active:
 Inside the VM:
 
 ```bash
-# part, units, Area, DCM mul/div, tag, PAR input period (ns), seed, host link, display, core
-bash ise/build.sh xc3s500e-fg320-4 4 Area 31 15 mybuild 22.94 7 uart nodisplay sha256_core_csa.vhd
+# part, units, Area, DCM mul/div, tag, PAR input period (ns), seed, host link, display, round
+bash ise/build.sh xc3s500e-fg320-4 5 Area 31 15 mybuild 22.94 3 uart nodisplay plain
+bash ise/refreq.sh 2 1 mybuild100 /tmp/nexys2-build/miner_top.ncd prom   # re-clock to 100 MHz
 # -> ise/out/mybuild.bit (JTAG) and ise/out/mybuild.svf (PROM)
 ```
 
@@ -162,7 +173,7 @@ without the board.
 
 ## What did not work
 
-- **5 units**: no room. **Floorplanning** each unit into its own region: logic
+- **5 units with the carry-save round**: 103 % of slices. **Floorplanning** each unit into its own region: logic
   of different area groups never shares a slice, which costs ~190 slices
   (104-105 %), whatever the region shapes.
 - **A 2-stage pipeline** (two nonces interleaved per core): doubles the state
@@ -179,6 +190,6 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-3.39 -> **3.48 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
-carry-save arithmetic, shared constants and control, and a lot of placement
-experiments.
+3.39 -> 3.48 -> **4.10 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
+carry-save arithmetic, shared constants and control, pass 1's hash in block
+RAM for a fifth unit, and a lot of placement experiments.

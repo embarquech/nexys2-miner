@@ -1,7 +1,9 @@
 #!/bin/bash
 # Command-line ISE 14.7 build of the Nexys2 miner, inside AMD's ISE Linux VM.
-#   bash build.sh [part] [cores] [Speed|Area] [mul] [div] [tag] [ts_ns] [seed] [depp|uart] [display|nodisplay] [core]
-#   core: an alternative to hdl/sha256_core.vhd, e.g. sha256_core_csa.vhd
+#   bash build.sh [part] [cores] [Speed|Area] [mul] [div] [tag] [ts_ns] [seed] [depp|uart] [display|nodisplay] [csa|plain]
+#   csa|hybrid|plain: the round's arithmetic (sha256_core.vhd, generics CSA and
+#   HYBRID): carry-save (default); carry-save without the d+h+K+W register
+#   (~100 LUTs per unit smaller); or two carry chains (~250 smaller, slower)
 #   12th arg: a UCF fragment in ise/ appended to the pin constraints (floorplan)
 #   default: xc3s500e-fg320-4, 4 units, Speed, core clock 50 MHz * 6 / 5 = 60 MHz.
 #   With a tag, the outputs are also kept as out/<tag>.bit and out/<tag>.svf.
@@ -25,7 +27,11 @@ TS=${7:-20}
 SEED=${8:-1}
 HOST=${9:-depp}
 SHOW_RATE=TRUE
-CORE=${11:-sha256_core.vhd}
+ROUND=${11:-csa}
+CSA=TRUE
+HYBRID=FALSE
+[ "$ROUND" = plain ] && CSA=FALSE
+[ "$ROUND" = hybrid ] && HYBRID=TRUE
 FLOORPLAN=${12:-}
 [ "${10:-display}" = nodisplay ] && SHOW_RATE=FALSE
 HOST_UART=FALSE
@@ -40,7 +46,6 @@ set -e
 
 rm -rf "$SRC" && mkdir -p "$SRC" "$OUT"
 cp "$HERE"/../hdl/*.vhd "$SRC"/
-cp "$HERE/../hdl/$CORE" "$SRC"/sha256_core.vhd
 sed "s/PERIOD \"clk50\" 20 ns/PERIOD \"clk50\" $TS ns/" "$HERE"/../hdl/nexys2.ucf > "$SRC"/nexys2.ucf
 [ -n "$FLOORPLAN" ] && cat "$HERE/$FLOORPLAN" >> "$SRC"/nexys2.ucf
 cd "$SRC"
@@ -65,7 +70,7 @@ run
 -top miner_top
 -opt_mode $OPT
 -opt_level 1
--generics {NCORES=$CORES CLK_MUL=$MUL CLK_DIV=$DIV HOST_UART=$HOST_UART SHOW_RATE=$SHOW_RATE}
+-generics {NCORES=$CORES CLK_MUL=$MUL CLK_DIV=$DIV HOST_UART=$HOST_UART SHOW_RATE=$SHOW_RATE CSA=$CSA HYBRID=$HYBRID}
 EOF
 
 step() { echo "== $*"; "$@" > "$1.log" 2>&1 || { tail -40 "$1.log"; cp ./*.log ./*.syr ./*.mrp "$OUT"/ 2>/dev/null; echo "FAILED: $1"; exit 1; }; }
