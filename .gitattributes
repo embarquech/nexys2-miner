@@ -1,0 +1,5 @@
+# Shell scripts run in the Linux ISE VM, and the patch must apply as-is.
+*.sh    text eol=lf
+*.patch text eol=lf
+*.svf   text eol=lf
+*.bit   binary

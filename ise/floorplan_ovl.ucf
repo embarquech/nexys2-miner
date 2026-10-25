@@ -1,0 +1,15 @@
+# Floorplan with overlapping regions: each hashing unit gets ~60 % of the width
+# and height around its own corner of the XC3S500E (slice grid X0-67, Y0-91).
+# Disjoint quarters do not fit (104 %): a unit closed in its quarter cannot
+# share slices with its neighbours. The overlap bands keep that sharing while
+# still keeping each unit away from the opposite corner. Rectangles go around
+# the DCM holes (columns 26-41, rows 0-7 and 84-91), whose corners are not
+# slice sites.
+INST "g_units[0].u/*" AREA_GROUP = "AG_U0";
+AREA_GROUP "AG_U0" RANGE = SLICE_X0Y0:SLICE_X41Y55;
+INST "g_units[1].u/*" AREA_GROUP = "AG_U1";
+AREA_GROUP "AG_U1" RANGE = SLICE_X42Y0:SLICE_X67Y55, SLICE_X26Y8:SLICE_X41Y55;
+INST "g_units[2].u/*" AREA_GROUP = "AG_U2";
+AREA_GROUP "AG_U2" RANGE = SLICE_X0Y36:SLICE_X25Y91, SLICE_X26Y36:SLICE_X41Y83;
+INST "g_units[3].u/*" AREA_GROUP = "AG_U3";
+AREA_GROUP "AG_U3" RANGE = SLICE_X42Y36:SLICE_X67Y91, SLICE_X26Y36:SLICE_X41Y83;

@@ -1,0 +1,896 @@
+diff --git a/components/asic/CMakeLists.txt b/components/asic/CMakeLists.txt
+index 0a962b48..228ed24b 100644
+--- a/components/asic/CMakeLists.txt
++++ b/components/asic/CMakeLists.txt
+@@ -5,6 +5,7 @@ SRCS
+     "bm1368.c"
+     "bm1366.c"
+     "bm1397.c"
++    "nexys2.c"
+     "serial.c"
+     "crc.c"
+     "asic_common.c"
+@@ -18,6 +19,7 @@ INCLUDE_DIRS
+ REQUIRES 
+     "freertos"
+     "esp_driver_uart"
++    "esp_driver_gpio"
+     "stratum"
+     "stratum_v2"
+     "tcp_transport"
+diff --git a/components/asic/asic.c b/components/asic/asic.c
+index 66b0f416..4ea35136 100644
+--- a/components/asic/asic.c
++++ b/components/asic/asic.c
+@@ -7,6 +7,7 @@
+ #include "bm1368.h"
+ #include "bm1370.h"
+ #include "bm1373.h"
++#include "nexys2.h"
+ 
+ #include "asic.h"
+ #include "global_state.h"
+@@ -30,6 +31,8 @@ uint8_t ASIC_init(GlobalState * GLOBAL_STATE)
+             return BM1370_init(GLOBAL_STATE);
+         case BM1373:
+             return BM1373_init(GLOBAL_STATE);
++        case NEXYS2:
++            return NEXYS2_init(GLOBAL_STATE);
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+     return 0;
+@@ -48,6 +51,8 @@ task_result * ASIC_process_work(GlobalState * GLOBAL_STATE)
+             return BM1370_process_work(GLOBAL_STATE);
+         case BM1373:
+             return BM1373_process_work(GLOBAL_STATE);
++        case NEXYS2:
++            return NEXYS2_process_work(GLOBAL_STATE);
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d — cannot process work", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+     return NULL;
+@@ -66,6 +71,8 @@ int ASIC_set_max_baud(GlobalState * GLOBAL_STATE)
+             return BM1370_set_max_baud();
+         case BM1373:
+             return BM1373_set_max_baud();
++        case NEXYS2:
++            return NEXYS2_set_max_baud();
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d — cannot set max baud", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+     return 0;
+@@ -89,6 +96,9 @@ void ASIC_send_work(GlobalState * GLOBAL_STATE, bm_job * next_job)
+         case BM1373:
+             BM1373_send_work(GLOBAL_STATE, next_job);
+             break;
++        case NEXYS2:
++            NEXYS2_send_work(GLOBAL_STATE, next_job);
++            break;
+         default:
+             ESP_LOGE(TAG, "Unknown ASIC id %d — cannot send work", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+             break;
+@@ -113,6 +123,8 @@ void ASIC_set_version_mask(GlobalState * GLOBAL_STATE, uint32_t mask)
+         case BM1373:
+             BM1373_set_version_mask(mask);
+             break;
++        case NEXYS2:
++            break;                      // the FPGA does not roll versions
+         default:
+             ESP_LOGE(TAG, "Unknown ASIC id %d — cannot set version mask", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+             break;
+@@ -137,6 +149,10 @@ void ASIC_set_frequency(GlobalState * GLOBAL_STATE)
+         case BM1373:
+             do_frequency_transition(GLOBAL_STATE, BM1373_send_hash_frequency);
+             return;
++        case NEXYS2:
++            // The FPGA clock is fixed by the bitstream (DCM settings).
++            GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_frequency = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value;
++            return;
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d — cannot set frequency", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+ }
+@@ -163,6 +179,8 @@ void ASIC_set_nonce_space(GlobalState * GLOBAL_STATE)
+         case BM1373:
+             BM1373_set_nonce_space(nonce_percent, frequency, asic_count, cores);
+             return;
++        case NEXYS2:
++            return;
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d — cannot set nonce space", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+ }
+@@ -183,6 +201,7 @@ double ASIC_get_asic_job_frequency_ms(GlobalState * GLOBAL_STATE)
+         case BM1368:
+         case BM1370:
+         case BM1373:
++        case NEXYS2:
+             return asic_default_timeout_divided;
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d — cannot compute job frequency", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+@@ -207,6 +226,9 @@ void ASIC_read_registers(GlobalState * GLOBAL_STATE)
+         case BM1373:
+             BM1373_read_registers();
+             break;
++        case NEXYS2:
++            NEXYS2_read_registers(GLOBAL_STATE);
++            break;
+         default:
+             ESP_LOGE(TAG, "Unknown ASIC id %d — cannot read registers", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+             break;
+diff --git a/components/asic/include/asic_common.h b/components/asic/include/asic_common.h
+index 934e7e01..ce784213 100644
+--- a/components/asic/include/asic_common.h
++++ b/components/asic/include/asic_common.h
+@@ -27,6 +27,7 @@ typedef enum
+     REGISTER_DOMAIN_3_COUNT,
+     REGISTER_ERROR_COUNT,    // error count register (all)
+     REGISTER_PLL_PARAM,      // PLL/clock config readback (BM1370)
++    REGISTER_HASHRATE_HPS,   // hashrate in plain H/s (Nexys2 FPGA)
+ } register_type_t;
+ 
+ typedef struct task_result
+diff --git a/components/asic/include/nexys2.h b/components/asic/include/nexys2.h
+new file mode 100644
+index 00000000..c8fbbb03
+--- /dev/null
++++ b/components/asic/include/nexys2.h
+@@ -0,0 +1,23 @@
++#ifndef NEXYS2_H_
++#define NEXYS2_H_
++
++#include <stdbool.h>
++#include "asic_common.h"
++
++typedef struct GlobalState GlobalState;
++typedef struct bm_job bm_job;
++
++// Digilent Nexys2 running the nexys2-miner FPGA bitstream (SHA-256d units),
++// reached over UART1; protocol in nexys2-miner/hdl/uart_bridge.vhd.
++#define NEXYS2_BAUD 921600
++// Clock cycles one FPGA unit spends per nonce (hdl/miner_unit.vhd).
++#define NEXYS2_CYCLES_PER_NONCE 122
++
++uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE);
++int NEXYS2_set_max_baud(void);
++void NEXYS2_send_work(GlobalState * GLOBAL_STATE, bm_job * next_bm_job);
++task_result * NEXYS2_process_work(GlobalState * GLOBAL_STATE);
++void NEXYS2_read_registers(GlobalState * GLOBAL_STATE);
++void NEXYS2_set_lights(bool on);
++
++#endif /* NEXYS2_H_ */
+diff --git a/components/asic/nexys2.c b/components/asic/nexys2.c
+new file mode 100644
+index 00000000..c4d0581c
+--- /dev/null
++++ b/components/asic/nexys2.c
+@@ -0,0 +1,410 @@
++#include "nexys2.h"
++
++#include "global_state.h"
++#include "hashrate_monitor_task.h"
++#include "mining.h"
++#include "nvs_config.h"
++#include "serial.h"
++#include "utils.h"
++
++#include "esp_log.h"
++#include "esp_timer.h"
++#include "driver/gpio.h"
++#include "driver/uart.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/semphr.h"
++#include "freertos/task.h"
++
++#include <inttypes.h>
++#include <stdint.h>
++#include <string.h>
++
++static const char *TAG = "nexys2";
++
++// FPGA register map (nexys2-miner/hdl/miner_top.vhd)
++#define REG_JOB      0x00     // 84-byte job port: midstate, tail, first, mask, state3
++#define REG_CTRL     0x38
++#define REG_STATUS   0x39
++#define REG_CLEAR    0x3A
++#define REG_LIGHTS   0x3B
++#define REG_FOUND    0x40
++#define REG_PROGRESS 0x44
++#define REG_MAGIC    0x4E
++#define MAGIC        0xB7
++
++#define CMD_WRITE 0x57
++#define CMD_JOB   0x4A           // write n bytes to one address
++#define CMD_READ  0x52
++#define ACK       0x06
++#define UART_TIMEOUT_MS 50
++
++// The FPGA flags hashes whose top FPGA_HIT_BITS bits are zero (fixed in the
++// UART bitstream, ~3 hits/s). Every one is re-hashed here, which keeps a
++// running count of wrong hashes (an overclock that has gone too far), and only
++// those with HIT_BITS or more go on to ESP-Miner: one every ~20 s at 3 MH/s,
++// enough to show life on the dashboard.
++#define FPGA_HIT_BITS 20
++#ifndef HIT_BITS
++#define HIT_BITS 26
++#endif
++
++#define POLL_MS 20
++
++static SemaphoreHandle_t fpga_lock;
++static uint8_t ncores;
++static uint8_t job_id;
++static uint32_t job_version;
++static bool job_loaded;
++static int64_t job_loaded_us;
++static uint32_t last_progress;
++static int64_t last_progress_us;
++static uint32_t last_job_seq, job_seq;
++static uint8_t job_header[80];           // header of the loaded job, nonce bytes left 0
++static uint32_t hits_good, hits_bad;
++static task_result result;
++
++// --------------------------------------------------------------------------
++// UART register access. Callers hold fpga_lock.
++// --------------------------------------------------------------------------
++
++static bool fpga_cmd_write(uint8_t cmd, uint8_t addr, const uint8_t *data, uint8_t n)
++{
++    uint8_t buf[3 + 255];
++    buf[0] = cmd;
++    buf[1] = addr;
++    buf[2] = n;
++    memcpy(buf + 3, data, n);
++    SERIAL_send(buf, 3 + n, false);
++    uint8_t ack = 0;
++    if (SERIAL_rx(&ack, 1, UART_TIMEOUT_MS) != 1 || ack != ACK) {
++        ESP_LOGW(TAG, "no ack for write at 0x%02X", addr);
++        return false;
++    }
++    return true;
++}
++
++static bool fpga_write(uint8_t addr, const uint8_t *data, uint8_t n)
++{
++    return fpga_cmd_write(CMD_WRITE, addr, data, n);
++}
++
++static bool fpga_write_byte(uint8_t addr, uint8_t value)
++{
++    return fpga_write(addr, &value, 1);
++}
++
++static bool fpga_read(uint8_t addr, uint8_t *data, uint8_t n)
++{
++    uint8_t cmd[3] = {CMD_READ, addr, n};
++    SERIAL_send(cmd, 3, false);
++    if (SERIAL_rx(data, n, UART_TIMEOUT_MS) != n) {
++        ESP_LOGW(TAG, "short read at 0x%02X", addr);
++        SERIAL_clear_buffer();
++        return false;
++    }
++    return true;
++}
++
++static uint32_t be32(const uint8_t *b)
++{
++    return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
++}
++
++static void put_be32(uint8_t *b, uint32_t v)
++{
++    b[0] = v >> 24;
++    b[1] = v >> 16;
++    b[2] = v >> 8;
++    b[3] = v;
++}
++
++// --------------------------------------------------------------------------
++// SHA-256 compression, for a midstate in the FPGA's word order (H0 first,
++// big-endian words) independent of the BM job packet conventions.
++// --------------------------------------------------------------------------
++
++static const uint32_t K[64] = {
++    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
++};
++
++#define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
++
++static void sha256_midstate(const uint8_t block[64], uint32_t state[8])
++{
++    static const uint32_t IV[8] = {
++        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
++    };
++    uint32_t w[64];
++    for (int t = 0; t < 16; t++) {
++        w[t] = be32(block + 4 * t);
++    }
++    for (int t = 16; t < 64; t++) {
++        uint32_t s0 = ROTR(w[t - 15], 7) ^ ROTR(w[t - 15], 18) ^ (w[t - 15] >> 3);
++        uint32_t s1 = ROTR(w[t - 2], 17) ^ ROTR(w[t - 2], 19) ^ (w[t - 2] >> 10);
++        w[t] = w[t - 16] + s0 + w[t - 7] + s1;
++    }
++    uint32_t a = IV[0], b = IV[1], c = IV[2], d = IV[3], e = IV[4], f = IV[5], g = IV[6], h = IV[7];
++    for (int t = 0; t < 64; t++) {
++        uint32_t t1 = h + (ROTR(e, 6) ^ ROTR(e, 11) ^ ROTR(e, 25)) + ((e & f) ^ (~e & g)) + K[t] + w[t];
++        uint32_t t2 = (ROTR(a, 2) ^ ROTR(a, 13) ^ ROTR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
++        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
++    }
++    state[0] = IV[0] + a; state[1] = IV[1] + b; state[2] = IV[2] + c; state[3] = IV[3] + d;
++    state[4] = IV[4] + e; state[5] = IV[5] + f; state[6] = IV[6] + g; state[7] = IV[7] + h;
++}
++
++// a..h of the second block after rounds 0-2. Those rounds only use header
++// bytes 64..75 (W0-W2), the same for every nonce, so the FPGA starts at round 3.
++static void sha256_state3(const uint32_t mid[8], const uint8_t tail[12], uint32_t out[8])
++{
++    uint32_t a = mid[0], b = mid[1], c = mid[2], d = mid[3], e = mid[4], f = mid[5], g = mid[6], h = mid[7];
++    for (int t = 0; t < 3; t++) {
++        uint32_t t1 = h + (ROTR(e, 6) ^ ROTR(e, 11) ^ ROTR(e, 25)) + ((e & f) ^ (~e & g)) + K[t] + be32(tail + 4 * t);
++        uint32_t t2 = (ROTR(a, 2) ^ ROTR(a, 13) ^ ROTR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
++        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
++    }
++    out[0] = a; out[1] = b; out[2] = c; out[3] = d; out[4] = e; out[5] = f; out[6] = g; out[7] = h;
++}
++
++// --------------------------------------------------------------------------
++// ASIC driver interface
++// --------------------------------------------------------------------------
++
++uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE)
++{
++    if (fpga_lock == NULL) {
++        fpga_lock = xSemaphoreCreateMutex();
++    }
++
++    SERIAL_set_baud(NEXYS2_BAUD);
++    SERIAL_clear_buffer();
++    // Bytes other than a command are ignored, so this ends any half-sent command.
++    uint8_t idle[4] = {0xFF, 0xFF, 0xFF, 0xFF};
++    SERIAL_send(idle, sizeof(idle), false);
++    vTaskDelay(pdMS_TO_TICKS(10));
++    SERIAL_clear_buffer();
++
++    uint8_t id[2] = {0};
++    xSemaphoreTake(fpga_lock, portMAX_DELAY);
++    bool ok = fpga_read(REG_MAGIC, id, 2) && id[0] == MAGIC;
++    if (!ok) {
++        // TX and RX crossed the wrong way round is the usual wiring slip; the
++        // pins are only a mux setting on the ESP32, so try them swapped.
++        ESP_LOGW(TAG, "no answer on GPIO17 TX / GPIO18 RX, trying them swapped");
++        // Detach both first: uart_set_pin() leaves GPIO17 routed to TX as
++        // well, which would drive against the FPGA's TX and echo our bytes.
++        gpio_reset_pin(17);
++        gpio_reset_pin(18);
++        uart_set_pin(UART_NUM_1, 18, 17, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
++        vTaskDelay(pdMS_TO_TICKS(10));
++        SERIAL_clear_buffer();
++        ok = fpga_read(REG_MAGIC, id, 2) && id[0] == MAGIC;
++        if (ok) {
++            ESP_LOGW(TAG, "found with GPIO18 TX / GPIO17 RX: the wires are crossed, it works anyway");
++        } else {
++            gpio_reset_pin(17);
++            gpio_reset_pin(18);
++            uart_set_pin(UART_NUM_1, 17, 18, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
++        }
++    }
++    xSemaphoreGive(fpga_lock);
++    if (!ok) {
++        ESP_LOGE(TAG, "Nexys2 not found on UART1 (read %02X %02X): check the UART bitstream and wiring", id[0], id[1]);
++        return 0;
++    }
++    ncores = id[1];
++    ESP_LOGI(TAG, "Nexys2 FPGA miner found, %u hashing units", ncores);
++
++    NEXYS2_set_lights(!nvs_config_get_bool(NVS_CONFIG_FPGA_LIGHTS_OFF));
++
++    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_frequency = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value;
++    return 1;
++}
++
++int NEXYS2_set_max_baud(void)
++{
++    return NEXYS2_BAUD;
++}
++
++void NEXYS2_set_lights(bool on)
++{
++    if (fpga_lock == NULL) {
++        return;
++    }
++    xSemaphoreTake(fpga_lock, portMAX_DELAY);
++    fpga_write_byte(REG_LIGHTS, on ? 0x00 : 0x01);
++    xSemaphoreGive(fpga_lock);
++}
++
++void NEXYS2_send_work(GlobalState * GLOBAL_STATE, bm_job * next_bm_job)
++{
++    // Same 80-byte header test_nonce_value_full() rebuilds for verification.
++    uint8_t header[80];
++    memcpy(header, &next_bm_job->version, 4);
++    reverse_32bit_words(next_bm_job->prev_block_hash, header + 4);
++    reverse_32bit_words(next_bm_job->merkle_root, header + 36);
++    memcpy(header + 68, &next_bm_job->ntime, 4);
++    memcpy(header + 72, &next_bm_job->target, 4);
++
++    uint32_t mid[8];
++    sha256_midstate(header, mid);
++
++    // job port: midstate, header bytes 64..75, first nonce word, hit mask, state3
++    uint8_t regs[84];
++    for (int i = 0; i < 8; i++) {
++        put_be32(regs + 4 * i, mid[i]);
++    }
++    memcpy(regs + 32, header + 64, 12);
++    put_be32(regs + 44, 0);
++    // The hash is read little-endian, so its top 32 bits are H7 byte-swapped.
++    uint32_t top = (uint32_t)(((1ULL << FPGA_HIT_BITS) - 1) << (32 - FPGA_HIT_BITS));
++    put_be32(regs + 48, __builtin_bswap32(top));
++
++    uint32_t st3[8];
++    sha256_state3(mid, header + 64, st3);
++    for (int i = 0; i < 8; i++) {
++        put_be32(regs + 52 + 4 * i, st3[i]);
++    }
++
++    uint8_t id = (job_id + 4) % 128;      // multiples of 4, as SYSTEM_clean_jobs_queue expects
++
++    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
++    if (GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[id] != NULL) {
++        free_bm_job(GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[id]);
++    }
++    GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[id] = next_bm_job;
++    GLOBAL_STATE->valid_jobs[id] = 1;
++    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
++
++    xSemaphoreTake(fpga_lock, portMAX_DELAY);
++    bool ok = fpga_write_byte(REG_CTRL, 0x02)            // stop
++              && fpga_cmd_write(CMD_JOB, REG_JOB, regs, sizeof(regs))
++              && fpga_write_byte(REG_CTRL, 0x01);       // restart from nonce word 0
++    if (ok) {
++        // A hit read after this point belongs to the new job: restart clears it.
++        job_id = id;
++        job_version = next_bm_job->version;
++        job_loaded = true;
++        job_loaded_us = esp_timer_get_time();
++        job_seq++;
++        memcpy(job_header, header, sizeof(job_header));
++    }
++    xSemaphoreGive(fpga_lock);
++
++    if (!ok) {
++        ESP_LOGE(TAG, "failed to load job %02X into the FPGA", id);
++    }
++}
++
++task_result * NEXYS2_process_work(GlobalState * GLOBAL_STATE)
++{
++    // Block for up to a second: the result task loops on this without delay,
++    // so returning at once would spin it into the task watchdog.
++    for (int i = 0; i < 1000 / POLL_MS; i++) {
++        uint8_t status = 0, word[4];
++        bool hit = false;
++        uint8_t hit_job = 0;
++        uint32_t hit_version = 0;
++        uint8_t hit_header[80];
++
++        xSemaphoreTake(fpga_lock, portMAX_DELAY);
++        if (job_loaded && fpga_read(REG_STATUS, &status, 1) && (status & 0x02)) {
++            if (fpga_read(REG_FOUND, word, 4)) {
++                fpga_write_byte(REG_CLEAR, 0x00);
++                hit = true;
++                hit_job = job_id;
++                hit_version = job_version;
++                memcpy(hit_header, job_header, sizeof(hit_header));
++            }
++        }
++        xSemaphoreGive(fpga_lock);
++
++        if (hit) {
++            // the FPGA reports the unit's counter, already one step past the hit
++            uint32_t w = be32(word) - ncores;
++            put_be32(word, w);
++
++            // Re-hash: an overclocked FPGA can return wrong nonces, and the
++            // good/bad tally is the only way to see that from here.
++            uint8_t hash[32];
++            memcpy(hit_header + 76, word, 4);
++            double_sha256_bin(hit_header, 80, hash);
++            // hash is little-endian: its top bits are the last bytes
++            uint32_t top32 = ((uint32_t)hash[31] << 24) | ((uint32_t)hash[30] << 16) | ((uint32_t)hash[29] << 8) | hash[28];
++            bool good = (top32 >> (32 - FPGA_HIT_BITS)) == 0;
++            if (good) {
++                hits_good++;
++            } else {
++                hits_bad++;
++            }
++            if ((hits_good + hits_bad) % 1000 == 0) {
++                ESP_LOGI(TAG, "hits checked: %" PRIu32 " good, %" PRIu32 " bad (%.1f%% bad)",
++                         hits_good, hits_bad, 100.0 * hits_bad / (hits_good + hits_bad));
++            }
++            if (!good) {
++                ESP_LOGW(TAG, "bad hit 0x%08" PRIX32 " from unit %d: the FPGA clock may be too fast",
++                         w, ncores ? (int)(w % ncores) : 0);
++                vTaskDelay(pdMS_TO_TICKS(POLL_MS));
++                continue;
++            }
++            if ((top32 >> (32 - HIT_BITS)) != 0) {
++                continue;                     // good, but below what ESP-Miner wants
++            }
++            memset(&result, 0, sizeof(result));
++            result.job_id = hit_job;
++            // header bytes 76..79 are the word big-endian; the nonce is their
++            // little-endian value (test_nonce_value_full memcpy's it in place)
++            result.nonce = __builtin_bswap32(w);
++            result.rolled_version = hit_version;    // the FPGA does not roll versions
++            result.asic_nr = 0;
++            result.core_id = ncores ? w % ncores : 0; // unit i hashes words i, i + n, ...
++            result.timestamp_us = esp_timer_get_time();
++            return &result;
++        }
++        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
++    }
++    return NULL;
++}
++
++void NEXYS2_read_registers(GlobalState * GLOBAL_STATE)
++{
++    uint8_t word[4];
++    xSemaphoreTake(fpga_lock, portMAX_DELAY);
++    bool ok = job_loaded && fpga_read(REG_PROGRESS, word, 4);
++    uint32_t seq = job_seq;
++    int64_t loaded_us = job_loaded_us;
++    xSemaphoreGive(fpga_lock);
++    if (!ok) {
++        return;
++    }
++
++    // Unit 0's nonce word advances by the unit count each time every unit
++    // finishes a nonce, so from 0 it equals the total nonces hashed.
++    uint32_t progress = be32(word);
++    int64_t now = esp_timer_get_time();
++    uint32_t hashes;
++    int64_t elapsed;
++    if (seq != last_job_seq) {                // a job reload restarted the count at 0
++        hashes = progress;
++        elapsed = now - loaded_us;
++        last_job_seq = seq;
++    } else {
++        hashes = progress - last_progress;
++        elapsed = now - last_progress_us;
++    }
++    last_progress = progress;
++    last_progress_us = now;
++    if (elapsed <= 0) {
++        return;
++    }
++
++    uint32_t hps = (uint32_t)((uint64_t)hashes * 1000000ULL / (uint64_t)elapsed);
++    hashrate_monitor_register_read(GLOBAL_STATE, REGISTER_HASHRATE_HPS, 0, hps, now);
++}
+diff --git a/config-nexys2.cvs b/config-nexys2.cvs
+new file mode 100644
+index 00000000..1c0640d5
+--- /dev/null
++++ b/config-nexys2.cvs
+@@ -0,0 +1,28 @@
++key,type,encoding,value
++main,namespace,,
++hostname,data,string,nexys2
++wifissid,data,string,
++wifipass,data,string,
++stratumurl,data,string,your.pool.example
++stratumport,data,u16,3333
++stratumuser,data,string,YOUR_POOL_USER.nexys2
++stratumpass,data,string,d=10
++stratumdiff,data,u16,10
++stratumxnsub,data,u16,0
++fbstratumurl,data,string,your.pool.example
++fbstratumport,data,u16,3333
++fbstratumuser,data,string,YOUR_POOL_USER.nexys2
++fbstratumpass,data,string,d=10
++fbstratumdiff,data,u16,10
++fbstratumxnsum,data,u16,0
++asicfrequency,data,u16,97
++asicvoltage,data,u16,1200
++autofanspeed,data,u16,0
++fanspeed,data,u16,0
++overheat_mode,data,u16,0
++# ESP32-S3 DevKitC-1 driving a Digilent Nexys2 FPGA over UART1 (GPIO17 TX,
++# GPIO18 RX to Pmod JA pins 1 and 2). No I2C bus, regulator, fan, sensors or
++# display, so no self-test either: it would fail on the missing sensors.
++boardversion,data,string,nexys2
++display,data,string,NONE
++fpgalightsoff,data,u16,0
+diff --git a/main/device_config.h b/main/device_config.h
+index 5c250c32..c5a9e932 100644
+--- a/main/device_config.h
++++ b/main/device_config.h
+@@ -26,6 +26,7 @@ typedef enum
+     BM1368,
+     BM1370,
+     BM1373,
++    NEXYS2,      // Digilent Nexys2 FPGA over UART, not a Bitmain chip
+ } Asic;
+ 
+ typedef struct AsicConfig {
+@@ -60,6 +61,7 @@ typedef enum
+     GAMMA_HEX,
+     GAMMA_TURBO,
+     NAJA_DUO,
++    NEXYS2_FPGA,
+ } Family;
+ 
+ typedef struct FamilyConfig {
+@@ -122,8 +124,13 @@ static const AsicConfig ASIC_BM1370 = { .id = BM1370, .name = "BM1370", .chip_id
+ static const AsicConfig ASIC_BM1370XP = { .id = BM1370, .name = "BM1370", .chip_id = 1370, .default_frequency_mhz = 400, .frequency_options = BM1370_FRQUENCY_XP_OPTIONS, .default_voltage_mv = 1150, .voltage_options = BM1370_VOLTAGE_OPTIONS, .difficulty = 256, .core_count = 128, .small_core_count = 2040, .hash_domains = 4, .hashrate_test_percentage_target = 0.85, .default_asic_timeout = 500};
+ static const AsicConfig ASIC_BM1370_HEX = { .id = BM1370, .name = "BM1370", .chip_id = 1370, .default_frequency_mhz = 690, .frequency_options = BM1370_FREQUENCY_OPTIONS, .default_voltage_mv = 1200, .voltage_options = BM1370_VOLTAGE_OPTIONS, .difficulty = 256, .core_count = 128, .small_core_count = 2040, .hash_domains = 4, .hashrate_test_percentage_target = 0.85, .default_asic_timeout = 500};
+ static const AsicConfig ASIC_BM1373 = { .id = BM1373, .name = "BM1372/BM1373", .chip_id = 1372, .default_frequency_mhz = 327, .frequency_options = BM1373_FREQUENCY_OPTIONS, .default_voltage_mv = 1000, .voltage_options = BM1373_VOLTAGE_OPTIONS, .difficulty = 256, .core_count = 128, .small_core_count = 6725, .hash_domains = 4, .init_retry_attempts = 3, .domain_hashrate_scale = 2.0f, .hashrate_test_percentage_target = 0.85, .default_asic_timeout = 500};
++// The FPGA clock is set by the bitstream (50 MHz * 31 / 15); listed for the UI only.
++static const uint16_t NEXYS2_FREQUENCY_OPTIONS[] = {103, 0};
++static const uint16_t NEXYS2_VOLTAGE_OPTIONS[]   = {1200, 0};
++static const AsicConfig ASIC_NEXYS2 = { .id = NEXYS2, .name = "Nexys2 FPGA", .chip_id = 0, .default_frequency_mhz = 103, .frequency_options = NEXYS2_FREQUENCY_OPTIONS, .default_voltage_mv = 1200, .voltage_options = NEXYS2_VOLTAGE_OPTIONS, .difficulty = 1, .core_count = 4, .small_core_count = 4, .hash_domains = 1, .hashrate_test_percentage_target = 0.85, .default_asic_timeout = 10000};
+ 
+ static const AsicConfig default_asic_configs[] = {
++    ASIC_NEXYS2,
+     ASIC_BM1397,
+     ASIC_BM1366,
+     ASIC_BM1368,
+@@ -142,8 +149,10 @@ static const FamilyConfig FAMILY_SUPRA_HEX   = { .id = SUPRA_HEX,   .name = "Sup
+ static const FamilyConfig FAMILY_GAMMA_TURBO = { .id = GAMMA_TURBO, .name = "GammaTurbo", .asic = ASIC_BM1370,   .asic_count = 2, .max_power =  60, .power_offset = 10, .nominal_voltage = 12, .voltage_domains = 1, .swarm_color = "cyan",     .tps546_config = &TPS546_CONFIG_GAMMA_TURBO, };
+ static const FamilyConfig FAMILY_NAJA_DUO    = { .id = NAJA_DUO,    .name = "NajaDuo",    .asic = ASIC_BM1373,   .asic_count = 2, .max_power =  60, .power_offset = 0,  .nominal_voltage = 12, .voltage_domains = NAJA_DUO_VOLTAGE_DOMAINS, .swarm_color = "magenta",  .tps546_config = &TPS546_CONFIG_NAJA_DUO, };
+ static const FamilyConfig FAMILY_GAMMA_HEX   = { .id = GAMMA_HEX,   .name = "GammaHex",   .asic = ASIC_BM1370_HEX, .asic_count = 6, .max_power = 180, .power_offset = 25, .nominal_voltage = 12, .voltage_domains = GAMMA_HEX_VOLTAGE_DOMAINS, .swarm_color = "cyan", .tps546_config = &TPS546_CONFIG_GAMMA_HEX, };
++static const FamilyConfig FAMILY_NEXYS2_FPGA = { .id = NEXYS2_FPGA, .name = "Nexys2", .asic = ASIC_NEXYS2, .asic_count = 1, .max_power = 5, .power_offset = 0, .nominal_voltage = 5, .voltage_domains = 1, .swarm_color = "gray", .tps546_config = NULL, };
+ 
+ static const FamilyConfig default_families[] = {
++    FAMILY_NEXYS2_FPGA,
+     FAMILY_MAX,
+     FAMILY_ULTRA,
+     FAMILY_HEX,
+@@ -156,6 +165,9 @@ static const FamilyConfig default_families[] = {
+ };
+ 
+ static const DeviceConfig default_configs[] = {
++    // ESP32-S3 DevKitC-1 + Nexys2 FPGA on UART1 (GPIO17 TX, GPIO18 RX): no I2C,
++    // no regulator, fan, sensors or display.
++    { .board_version = "nexys2", .family = FAMILY_NEXYS2_FPGA, .pins = { .bap = NULL, .i2c = NULL, .i80 = NULL }, },
+     { .board_version = "2.2",  .family = FAMILY_MAX,         .pins = BITAXE_ORIGINAL_PINS, .EMC2101 = true,                                                                                 .DS4432U = true, .INA260 = true, .plug_sense = true, .asic_enable = true, .power_consumption_target = 12, },
+     { .board_version = "102",  .family = FAMILY_MAX,         .pins = BITAXE_ORIGINAL_PINS, .EMC2101 = true,                                                                                 .DS4432U = true, .INA260 = true, .plug_sense = true, .asic_enable = true, .power_consumption_target = 12, },
+     { .board_version = "0.11", .family = FAMILY_ULTRA,       .pins = BITAXE_ORIGINAL_PINS, .EMC2101 = true, .emc_internal_temp = true,                                  .temp_offset = 5,   .DS4432U = true, .INA260 = true, .plug_sense = true, .asic_enable = true, .power_consumption_target = 12, },
+diff --git a/main/display.c b/main/display.c
+index 0b705058..fac136c2 100644
+--- a/main/display.c
++++ b/main/display.c
+@@ -73,6 +73,14 @@ static esp_err_t read_display_config(GlobalState * GLOBAL_STATE)
+         return ESP_OK;
+     }
+ 
++    if (GLOBAL_STATE->DEVICE_CONFIG.pins.i2c == NULL) {
++        // A board without an I2C bus (e.g. an ESP32 driving an FPGA) cannot
++        // have the OLED, whatever NVS says; failing here would stop mining.
++        GLOBAL_STATE->DISPLAY_CONFIG = *get_display_config("NONE");
++        ESP_LOGI(TAG, "%s (no I2C bus)", GLOBAL_STATE->DISPLAY_CONFIG.name);
++        return ESP_OK;
++    }
++
+     char * display_config_name = nvs_config_get_string(NVS_CONFIG_DISPLAY);
+     const DisplayConfig * display_config = get_display_config(display_config_name);
+ 
+diff --git a/main/http_server/axe-os/src/app/components/edit/edit.component.html b/main/http_server/axe-os/src/app/components/edit/edit.component.html
+index 906615f0..8d5e74b9 100644
+--- a/main/http_server/axe-os/src/app/components/edit/edit.component.html
++++ b/main/http_server/axe-os/src/app/components/edit/edit.component.html
+@@ -51,6 +51,14 @@
+           </small>
+         </div>
+       }
++      @if (isNexys2) {
++        <div class="flex flex-col md:flex-row md:items-center mb-4 gap-2">
++          <label for="fpgaLightsOff" class="w-full md:w-2/12 font-medium cursor-pointer select-none">FPGA LEDs &amp; Display Off</label>
++          <div class="w-full md:w-10/12 flex items-center">
++            <app-checkbox name="fpgaLightsOff" formControlName="fpgaLightsOff" inputId="fpgaLightsOff" [binary]="true"></app-checkbox>
++          </div>
++        </div>
++      }
+       <div class="flex flex-col md:flex-row md:items-center mb-4 gap-2">
+         <label for="autofanspeed" class="w-full md:w-2/12 font-medium cursor-pointer select-none">Automatic Fan Control</label>
+         <div class="w-full md:w-10/12 flex items-center">
+diff --git a/main/http_server/axe-os/src/app/components/edit/edit.component.ts b/main/http_server/axe-os/src/app/components/edit/edit.component.ts
+index 930d454f..155735c5 100644
+--- a/main/http_server/axe-os/src/app/components/edit/edit.component.ts
++++ b/main/http_server/axe-os/src/app/components/edit/edit.component.ts
+@@ -161,6 +161,7 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
+       this.defaultVoltage = asic.defaultVoltage;
+       this.voltageOptions = asic.voltageOptions;
+       this.statsLimit = info.statsLimit || 720;
++      this.isNexys2 = info.ASICModel === 'Nexys2 FPGA';
+ 
+       // Check if overclock is enabled in NVS
+       if (info.overclockEnabled) {
+@@ -183,6 +184,7 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
+           coreVoltage: [info.coreVoltage, [Validators.required]],
+           frequency: [info.frequency, [Validators.required]],
+           autofanspeed: [info.autofanspeed == 1, [Validators.required]],
++          fpgaLightsOff: [info.fpgaLightsOff == 1],
+           minFanSpeed: [info.minFanSpeed, [Validators.required]],
+           manualFanSpeed: [info.manualFanSpeed, [Validators.required]],
+           temptarget: [info.temptarget, [Validators.required]],
+@@ -247,6 +249,8 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
+     this.destroy$.complete();
+   }
+ 
++  public isNexys2 = false;
++
+   public updateSystem() {
+     const form = this.form.getRawValue();
+ 
+@@ -381,6 +385,7 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
+       'coreVoltage',
+       'frequency',
+       'autofanspeed',
++      'fpgaLightsOff',
+       'minFanSpeed',
+       'manualFanSpeed',
+       'temptarget',
+diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
+index ddbee942..7a37588e 100644
+--- a/main/http_server/http_server.c
++++ b/main/http_server/http_server.c
+@@ -1727,12 +1727,19 @@ static esp_err_t GET_cores(httpd_req_t * req)
+     uint32_t submitted[SHARE_CORE_COUNT];
+     share_info_get_core_counts(all, submitted);
+ 
++    // The page draws one cell per entry: report the chip's own core count
++    // (128 on a BM1370, 4 hashing units on the Nexys2 FPGA).
++    int cores = GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count;
++    if (cores < 1 || cores > SHARE_CORE_COUNT) {
++        cores = SHARE_CORE_COUNT;
++    }
++
+     cJSON * root = cJSON_CreateObject();
+-    cJSON_AddNumberToObject(root, "cores", SHARE_CORE_COUNT);
++    cJSON_AddNumberToObject(root, "cores", cores);
+ 
+     cJSON * all_array = cJSON_CreateArray();
+     cJSON * submitted_array = cJSON_CreateArray();
+-    for (int i = 0; i < SHARE_CORE_COUNT; i++) {
++    for (int i = 0; i < cores; i++) {
+         cJSON_AddItemToArray(all_array, cJSON_CreateNumber(all[i]));
+         cJSON_AddItemToArray(submitted_array, cJSON_CreateNumber(submitted[i]));
+     }
+diff --git a/main/http_server/openapi.yaml b/main/http_server/openapi.yaml
+index 8ec42c2b..c5e4dc8b 100644
+--- a/main/http_server/openapi.yaml
++++ b/main/http_server/openapi.yaml
+@@ -326,6 +326,9 @@ components:
+         autofanspeed:
+           type: number
+           description: Automatic fan speed control (0=manual, 1=auto)
++        fpgaLightsOff:
++          type: integer
++          description: Nexys2 FPGA only - LEDs and 7-segment display switched off (0=on, 1=off)
+         bestDiff:
+           type: number
+           description: Best difficulty achieved
+@@ -714,6 +717,7 @@ components:
+             - BM1370
+             - BM1373
+             - BM1397
++            - Nexys2 FPGA
+           examples:
+             - "BM1366"
+         deviceModel:
+@@ -984,6 +988,12 @@ components:
+           enum: [0, 1]
+           examples:
+             - 1
++        fpgaLightsOff:
++          type: integer
++          description: Nexys2 FPGA only - switch the board's LEDs and 7-segment display off (0=on, 1=off)
++          enum: [0, 1]
++          examples:
++            - 0
+         manualFanSpeed:
+           type: integer
+           description: Manual fan speed percentage when autofanspeed is disabled
+diff --git a/main/http_server/system_api_json.c b/main/http_server/system_api_json.c
+index 7bae0df5..54f2709f 100644
+--- a/main/http_server/system_api_json.c
++++ b/main/http_server/system_api_json.c
+@@ -252,6 +252,7 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
+     cJSON_AddNumberToObject(root, "invertscreen", nvs_config_get_bool(NVS_CONFIG_INVERT_SCREEN) ? 1 : 0);
+     cJSON_AddNumberToObject(root, "displayTimeout", nvs_config_get_i32(NVS_CONFIG_DISPLAY_TIMEOUT));
+     cJSON_AddNumberToObject(root, "autofanspeed", nvs_config_get_bool(NVS_CONFIG_AUTO_FAN_SPEED) ? 1 : 0);
++    cJSON_AddNumberToObject(root, "fpgaLightsOff", nvs_config_get_bool(NVS_CONFIG_FPGA_LIGHTS_OFF) ? 1 : 0);
+     cJSON_AddNumberToObject(root, "manualFanSpeed", nvs_config_get_u16(NVS_CONFIG_MANUAL_FAN_SPEED));
+     cJSON_AddNumberToObject(root, "minFanSpeed", nvs_config_get_u16(NVS_CONFIG_MIN_FAN_SPEED));
+     cJSON_AddNumberToObject(root, "temptarget", nvs_config_get_u16(NVS_CONFIG_TEMP_TARGET));
+diff --git a/main/nvs_config.c b/main/nvs_config.c
+index e68f99ef..236be719 100644
+--- a/main/nvs_config.c
++++ b/main/nvs_config.c
+@@ -82,6 +82,7 @@ static Settings settings[NVS_CONFIG_COUNT] = {
+     [NVS_CONFIG_DISPLAY_OFFSET]                        = {.nvs_key_name = "displayOffset",   .type = TYPE_U16,   .default_value = {.u16 = LCD_SH1107_PARAM_DEFAULT_DISP_OFFSET },       .rest_name = "displayOffset",                      .min = 0,  .max = UINT8_MAX},
+     [NVS_CONFIG_DISPLAY_TIMEOUT]                       = {.nvs_key_name = "displayTimeout",  .type = TYPE_I32,   .default_value = {.i32 = -1},                                          .rest_name = "displayTimeout",                     .min = -1, .max = UINT16_MAX},
+ 
++    [NVS_CONFIG_FPGA_LIGHTS_OFF]                       = {.nvs_key_name = "fpgalightsoff",   .type = TYPE_BOOL,                                                                         .rest_name = "fpgaLightsOff",                      .min = 0,  .max = 1},
+     [NVS_CONFIG_AUTO_FAN_SPEED]                        = {.nvs_key_name = "autofanspeed",    .type = TYPE_BOOL,  .default_value = {.b   = true},                                        .rest_name = "autofanspeed",                       .min = 0,  .max = 1},
+     [NVS_CONFIG_MANUAL_FAN_SPEED]                      = {.nvs_key_name = "manualfanspeed",  .type = TYPE_U16,   .default_value = {.u16 = 100},                                         .rest_name = "manualFanSpeed",                     .min = 0,  .max = 100},
+     [NVS_CONFIG_MIN_FAN_SPEED]                         = {.nvs_key_name = "minfanspeed",     .type = TYPE_U16,   .default_value = {.u16 = 25},                                          .rest_name = "minFanSpeed",                        .min = 0,  .max = 99},
+diff --git a/main/nvs_config.h b/main/nvs_config.h
+index a230f063..57ddc866 100644
+--- a/main/nvs_config.h
++++ b/main/nvs_config.h
+@@ -31,6 +31,7 @@ typedef enum {
+     NVS_CONFIG_DISPLAY_TIMEOUT,
+     NVS_CONFIG_DISPLAY_OFFSET,
+     
++    NVS_CONFIG_FPGA_LIGHTS_OFF,
+     NVS_CONFIG_AUTO_FAN_SPEED,
+     NVS_CONFIG_MANUAL_FAN_SPEED,
+     NVS_CONFIG_MIN_FAN_SPEED,
+diff --git a/main/tasks/hashrate_monitor_task.c b/main/tasks/hashrate_monitor_task.c
+index 94b04cb4..bf618b77 100644
+--- a/main/tasks/hashrate_monitor_task.c
++++ b/main/tasks/hashrate_monitor_task.c
+@@ -239,6 +239,14 @@ void hashrate_monitor_register_read(void *pvParameters, register_type_t register
+         case REGISTER_ERROR_COUNT:
+             update_hash_counter(&HASHRATE_MONITOR_MODULE->error_measurement[asic_nr], value, timestamp_us);
+             break;
++        case REGISTER_HASHRATE_HPS:
++            // Too slow for the 2^20-hash unit of REGISTER_HASHRATE (an FPGA
++            // does a few MH/s), so the driver reports plain H/s.
++            HASHRATE_MONITOR_MODULE->total_measurement[asic_nr].hashrate = value / 1e9f;
++            HASHRATE_MONITOR_MODULE->total_measurement[asic_nr].time_us = timestamp_us;
++            HASHRATE_MONITOR_MODULE->domain_measurements[asic_nr][0].hashrate = value / 1e9f;
++            HASHRATE_MONITOR_MODULE->domain_measurements[asic_nr][0].time_us = timestamp_us;
++            break;
+         case REGISTER_PLL_PARAM:
+             ESP_LOGD(TAG, "PLL param read asic %d: 0x%08" PRIX32, asic_nr, value);
+             break;
+diff --git a/main/tasks/power_management_task.c b/main/tasks/power_management_task.c
+index 6f95065a..20af52d5 100644
+--- a/main/tasks/power_management_task.c
++++ b/main/tasks/power_management_task.c
+@@ -7,6 +7,7 @@
+ #include "thermal.h"
+ #include "power.h"
+ #include "asic.h"
++#include "nexys2.h"
+ #include "utils.h"
+ #include "asic_init.h"
+ #include "asic_reset.h"
+@@ -89,6 +90,11 @@ static uint8_t mining_start(GlobalState * GLOBAL_STATE)
+ 
+ static float expected_hashrate(GlobalState * GLOBAL_STATE)
+ {
++    if (GLOBAL_STATE->DEVICE_CONFIG.family.asic.id == NEXYS2) {
++        // core_count units, one nonce per NEXYS2_CYCLES_PER_NONCE clocks; GH/s
++        return GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value * GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count
++               / NEXYS2_CYCLES_PER_NONCE / 1000.0;
++    }
+     return GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value * GLOBAL_STATE->DEVICE_CONFIG.family.asic.small_core_count * GLOBAL_STATE->DEVICE_CONFIG.family.asic_count / 1000.0;
+ }
+ 
+@@ -125,7 +131,18 @@ void POWER_MANAGEMENT_task(void * pvParameters)
+     float last_known_asic_frequency = 0.0;
+     bool is_paused = false;
+ 
++    bool last_lights_off = nvs_config_get_bool(NVS_CONFIG_FPGA_LIGHTS_OFF);
++
+     while (1) {
++        // Nexys2: LEDs and 7-segment display follow the fpgaLightsOff setting.
++        if (GLOBAL_STATE->DEVICE_CONFIG.family.asic.id == NEXYS2 && GLOBAL_STATE->ASIC_initalized) {
++            bool lights_off = nvs_config_get_bool(NVS_CONFIG_FPGA_LIGHTS_OFF);
++            if (lights_off != last_lights_off) {
++                NEXYS2_set_lights(!lights_off);
++                last_lights_off = lights_off;
++            }
++        }
++
+         if (GLOBAL_STATE->SELF_TEST_MODULE.is_finished) {
+             ESP_LOGI(TAG, "Stopped");
+             vTaskDelete(NULL);

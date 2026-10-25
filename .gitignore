@@ -1,0 +1,12 @@
+# build outputs
+ise/out/
+*.ncd
+*.ngc
+*.ngd
+__pycache__/
+*.pyc
+# old experiments
+attic/
+# personal pool settings (copy sw/pool.example.json to sw/pool.json)
+sw/pool*.json
+!sw/pool.example.json

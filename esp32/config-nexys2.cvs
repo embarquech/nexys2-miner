@@ -1,0 +1,28 @@
+key,type,encoding,value
+main,namespace,,
+hostname,data,string,nexys2
+wifissid,data,string,
+wifipass,data,string,
+stratumurl,data,string,your.pool.example
+stratumport,data,u16,3333
+stratumuser,data,string,YOUR_POOL_USER.nexys2
+stratumpass,data,string,d=10
+stratumdiff,data,u16,10
+stratumxnsub,data,u16,0
+fbstratumurl,data,string,your.pool.example
+fbstratumport,data,u16,3333
+fbstratumuser,data,string,YOUR_POOL_USER.nexys2
+fbstratumpass,data,string,d=10
+fbstratumdiff,data,u16,10
+fbstratumxnsum,data,u16,0
+asicfrequency,data,u16,97
+asicvoltage,data,u16,1200
+autofanspeed,data,u16,0
+fanspeed,data,u16,0
+overheat_mode,data,u16,0
+# ESP32-S3 DevKitC-1 driving a Digilent Nexys2 FPGA over UART1 (GPIO17 TX,
+# GPIO18 RX to Pmod JA pins 1 and 2). No I2C bus, regulator, fan, sensors or
+# display, so no self-test either: it would fail on the missing sensors.
+boardversion,data,string,nexys2
+display,data,string,NONE
+fpgalightsoff,data,u16,0

@@ -1,0 +1,218 @@
+-- Iterative SHA-256 compression for the two passes of a Bitcoin header hash,
+-- one round per clock, with the rounds that do not depend on the nonce taken
+-- out:
+--   pass 1 (short = '0'): starts at round 3 from a state the host computed
+--          once per job (rounds 0-2 only see header words 64..75); 62 clocks.
+--   pass 2 (short = '1'): starts from the SHA-256 IV, so round 0 is folded
+--          into the load clock, and it stops after round 60 (only H7 is
+--          needed, and e then already holds the final h); 61 clocks.
+-- There is no separate feed-forward clock: the state is captured with the last
+-- round, adding ff_in to the words that come straight from registers (b, c, d,
+-- f, g, h). Words 0 and 4 come out of the round's adders and are left raw, or
+-- the add would sit on the critical path; the caller adds ff_in there. Pass 2
+-- only uses word 4, raw e (H7 = IV H7 + e).
+-- (Capturing everything raw would leave 256 flip-flops per core without a LUT
+-- to share a slice with, which no longer fits the XC3S500E.)
+--
+-- h + K(t) + W(t) is computed one round ahead (h of the next round is the
+-- current g). T1 = hkw + S1(e) + Ch(e,f,g) goes through a carry-save stage and
+-- a single adder, so the critical e -> a path crosses two carry chains.
+-- (Carry-save for all of a and e, with d + h + K + W also precomputed, cuts
+-- that to one chain each but takes ~1400 more LUTs: 102 % of the XC3S500E.)
+--
+-- The message is read one word per clock: widx says which word is wanted on
+-- msg_word. The schedule history only needs W(t), W(t-5), W(t-13) and
+-- W(t-14), so it lives in a delay line that XST maps to SRL16s. The words a
+-- pass skips (W0-W2 in pass 1, W0 in pass 2) never enter it; the caller
+-- supplies them on ovw0..ovw2 and they are written into the last two stages
+-- of the line just before the rounds that tap them, so the W adders only ever
+-- see registers (a mux on the taps put the round counter on the W path).
+--
+-- The round constants come from outside: kidx says which K is wanted on k_in
+-- during the next clock, so one registered K table serves cores in lockstep.
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.sha256_pkg.all;
+
+entity sha256_core is
+  port (
+    clk       : in  std_logic;
+    abort     : in  std_logic;                 -- drops the block in progress
+    start     : in  std_logic;                 -- one-cycle pulse
+    short     : in  std_logic;                 -- read on start: '1' = pass 2
+    state_in  : in  unsigned(255 downto 0);    -- pass 1: state after round 2
+    hk3       : in  word;                      -- pass 1: h + K(3) of state_in
+    dhk3      : in  word;                      -- unused (kept for the carry-save variant)
+    ff_in     : in  unsigned(255 downto 0);    -- pass 1 chaining value (midstate)
+    mf0       : in  word;                      -- pass 2: W0, read on start
+    mf1       : in  word;                      -- W1 (pass 2) or W3, the nonce (pass 1), read on start
+    nonce_in  : in  word;                      -- unused (mf1 carries the nonce)
+    chain     : in  std_logic;                 -- unused: this core does not chain passes
+    widx      : out unsigned(3 downto 0);      -- index of the word wanted on msg_word
+    msg_word  : in  word;                      -- message word widx
+    ovw0      : in  word;                      -- W0 of the current pass
+    ovw1      : in  word;                      -- W1 (pass 1)
+    ovw2      : in  word;                      -- W2 (pass 1)
+    kidx      : out unsigned(5 downto 0);      -- K index wanted on k_in next clock
+    k_in      : in  word;                      -- K(t + 1) during round t
+    done      : out std_logic;                 -- one-cycle pulse, hash_out valid
+    busy      : out std_logic;                 -- running (also right after a chained load)
+    hash_out  : out unsigned(255 downto 0));   -- words 0, 4 raw; others ff_in + raw
+end entity;
+
+architecture rtl of sha256_core is
+  type delay5_t is array (1 to 5) of word;
+  type delay8_t is array (6 to 13) of word;
+
+  function iv_w(i : natural) return word is
+  begin
+    return IV(255 - 32 * i downto 224 - 32 * i);
+  end;
+
+  -- Round 0 of pass 2 on the IV: everything but W0 is constant.
+  constant T1_IV : word := iv_w(7) + bsig1(iv_w(4)) + ch(iv_w(4), iv_w(5), iv_w(6)) + K(0);
+  constant A1_IV : word := T1_IV + bsig0(iv_w(0)) + maj(iv_w(0), iv_w(1), iv_w(2));
+  constant E1_IV : word := iv_w(3) + T1_IV;
+  constant HK1_IV : word := iv_w(6) + K(1);    -- h after round 0 is IV g
+  constant DHK1_IV : word := iv_w(2) + HK1_IV; -- and d is IV c
+
+  signal a, b, c, d, e, f, g, h : word;
+  signal hkw     : word;                       -- h + K(t) + W(t)
+  signal wn      : word;                       -- W(t + 1)
+  signal d0      : word;                       -- W(t)
+  signal s5      : delay5_t;                   -- s5(k) = W(t - k)
+  signal s8      : delay8_t;                   -- s8(k) = W(t - k)
+  signal d14     : word;                       -- W(t - 14)
+  signal t       : unsigned(5 downto 0) := (others => '0');
+  signal idx     : unsigned(3 downto 0) := (others => '0');
+  signal running : std_logic := '0';
+  signal short_r : std_logic := '0';
+  signal done_r  : std_logic := '0';
+  signal hash_r  : unsigned(255 downto 0) := (others => '0');
+
+  function sw(v : unsigned(255 downto 0); i : natural) return word is
+  begin
+    return v(255 - 32 * i downto 224 - 32 * i);
+  end;
+begin
+  -- Schedule delay line: no reset and a single enable, so it maps to SRL16.
+  process (clk)
+  begin
+    if rising_edge(clk) then
+      if start = '1' or running = '1' then
+        if start = '1' then
+          d0 <= mf1;                           -- the first round's W
+        else
+          d0 <= wn;
+        end if;
+        s5(1) <= d0;
+        for k in 2 to 5 loop
+          s5(k) <= s5(k - 1);
+        end loop;
+        s8(6) <= s5(5);
+        for k in 7 to 12 loop
+          s8(k) <= s8(k - 1);
+        end loop;
+        s8(13) <= s8(12);
+        d14    <= s8(13);
+        -- Taps reaching before the first pushed word: pass 1 needs
+        -- (W(t-13), W(t-14)) = (W1, W0) at t = 14 and (W2, W1) at 15, then
+        -- W2 at 16, which the shift brings along by itself; pass 2 only
+        -- needs W0 at t = 14.
+        if running = '1' and t = 13 then
+          d14 <= ovw0;
+          if short_r = '0' then
+            s8(13) <= ovw1;
+          end if;
+        elsif running = '1' and t = 14 and short_r = '0' then
+          s8(13) <= ovw2;
+        end if;
+      end if;
+    end if;
+  end process;
+
+  process (clk)
+    variable s1, chv, t1, t2, an, en : word;
+  begin
+    if rising_edge(clk) then
+      done_r <= '0';
+      if abort = '1' then
+        running <= '0';
+      elsif start = '1' then
+        if short = '1' then                    -- pass 2: state after round 0
+          a <= A1_IV + mf0;
+          b <= iv_w(0);
+          c <= iv_w(1);
+          d <= iv_w(2);
+          e <= E1_IV + mf0;
+          f <= iv_w(4);
+          g <= iv_w(5);
+          h <= iv_w(6);
+          hkw  <= HK1_IV + mf1;
+          t   <= to_unsigned(1, 6);
+          idx <= to_unsigned(3, 4);
+        else                                   -- pass 1: state after round 2
+          a <= sw(state_in, 0);
+          b <= sw(state_in, 1);
+          c <= sw(state_in, 2);
+          d <= sw(state_in, 3);
+          e <= sw(state_in, 4);
+          f <= sw(state_in, 5);
+          g <= sw(state_in, 6);
+          h <= sw(state_in, 7);
+          hkw  <= hk3 + mf1;
+          t   <= to_unsigned(3, 6);
+          idx <= to_unsigned(5, 4);
+        end if;
+        wn      <= msg_word;                   -- the second round's W
+        running <= '1';
+        short_r <= short;
+      elsif running = '1' then
+        s1  := bsig1(e);
+        chv := ch(e, f, g);
+        t1 := csa_s(hkw, s1, chv) + csa_c(hkw, s1, chv);
+        t2 := bsig0(a) + maj(a, b, c);
+        an := t1 + t2;
+        en := d + t1;
+        h <= g;
+        g <= f;
+        f <= e;
+        e <= en;
+        d <= c;
+        c <= b;
+        b <= a;
+        a <= an;
+        hkw <= g + k_in + wn;
+
+        if t <= 13 then                        -- W(t + 2) is a message word
+          wn <= msg_word;
+        else
+          wn <= ssig1(d0) + s5(5) + ssig0(s8(13)) + d14;
+        end if;
+        idx <= idx + 1;
+
+        -- Capture with the last round instead of spending a clock on the
+        -- feed-forward add (see the header comment for words 0 and 4).
+        if t = 63 or (short_r = '1' and t = 60) then
+          running <= '0';
+          done_r  <= '1';
+          hash_r  <= an & (sw(ff_in, 1) + a) & (sw(ff_in, 2) + b) & (sw(ff_in, 3) + c) &
+                     en & (sw(ff_in, 5) + e) & (sw(ff_in, 6) + f) & (sw(ff_in, 7) + g);
+        end if;
+        t <= t + 1;
+      end if;
+    end if;
+  end process;
+
+  -- The clock after start runs the first round, which looks K one ahead.
+  kidx <= to_unsigned(2, 6) when start = '1' and short = '1' else
+          to_unsigned(4, 6) when start = '1' else
+          t + 2;
+  widx <= to_unsigned(2, 4) when start = '1' and short = '1' else
+          to_unsigned(4, 4) when start = '1' else
+          idx;
+  done     <= done_r;
+  busy     <= running;
+  hash_out <= hash_r;
+end architecture;

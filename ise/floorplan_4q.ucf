@@ -1,0 +1,11 @@
+# Floorplan: one quarter of the XC3S500E slice grid (X0-67, Y0-91) per hashing
+# unit, so each unit's wires stay short. Shared logic (host link, job registers,
+# K table) is left free to fill the gaps.
+INST "g_units[0].u/*" AREA_GROUP = "AG_U0";
+AREA_GROUP "AG_U0" RANGE = SLICE_X0Y0:SLICE_X33Y45;
+INST "g_units[1].u/*" AREA_GROUP = "AG_U1";
+AREA_GROUP "AG_U1" RANGE = SLICE_X42Y0:SLICE_X67Y45, SLICE_X34Y8:SLICE_X41Y45;   # around the bottom DCM hole
+INST "g_units[2].u/*" AREA_GROUP = "AG_U2";
+AREA_GROUP "AG_U2" RANGE = SLICE_X0Y46:SLICE_X25Y91, SLICE_X26Y46:SLICE_X33Y83;   # around the top DCM hole
+INST "g_units[3].u/*" AREA_GROUP = "AG_U3";
+AREA_GROUP "AG_U3" RANGE = SLICE_X34Y46:SLICE_X67Y91;

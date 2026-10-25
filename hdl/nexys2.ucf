@@ -1,0 +1,49 @@
+# Digilent Nexys2 (XC3S500E or XC3S1200E, FG320) - pins from the Nexys2 reference manual.
+
+NET "clk50" LOC = "B8";
+NET "clk50" TNM_NET = "clk50";
+TIMESPEC "TS_clk50" = PERIOD "clk50" 20 ns HIGH 50%;   # the DCM output inherits CLK_MUL/CLK_DIV
+
+# On-board USB controller, DEPP interface
+NET "EppAstb"  LOC = "V14";
+NET "EppDstb"  LOC = "U14";
+NET "EppWr"    LOC = "V16";
+NET "EppWait"  LOC = "N9";
+NET "EppDB<0>" LOC = "R14";
+NET "EppDB<1>" LOC = "R13";
+NET "EppDB<2>" LOC = "P13";
+NET "EppDB<3>" LOC = "T12";
+NET "EppDB<4>" LOC = "N11";
+NET "EppDB<5>" LOC = "R11";
+NET "EppDB<6>" LOC = "P10";
+NET "EppDB<7>" LOC = "R10";
+
+# LD0-LD3 (same pins on every board revision; LD4-LD7 differ, so unused)
+NET "Led<0>" LOC = "J14";
+NET "Led<1>" LOC = "J15";
+NET "Led<2>" LOC = "K15";
+NET "Led<3>" LOC = "K14";
+
+# Push buttons, active high: BTN0 B18, BTN1 D18, BTN2 E18, BTN3 H13
+NET "Btn<0>" LOC = "B18";
+NET "Btn<1>" LOC = "D18";
+NET "Btn<2>" LOC = "E18";
+NET "Btn<3>" LOC = "H13";
+
+# 4-digit 7-segment display, all active low; AN3 is the leftmost digit
+NET "Seg<0>" LOC = "L18";   # CA
+NET "Seg<1>" LOC = "F18";   # CB
+NET "Seg<2>" LOC = "D17";   # CC
+NET "Seg<3>" LOC = "D16";   # CD
+NET "Seg<4>" LOC = "G14";   # CE
+NET "Seg<5>" LOC = "J17";   # CF
+NET "Seg<6>" LOC = "H14";   # CG
+NET "Seg<7>" LOC = "C17";   # DP
+NET "An<0>"  LOC = "F17";
+NET "An<1>"  LOC = "H17";
+NET "An<2>"  LOC = "C18";
+NET "An<3>"  LOC = "F15";
+
+# UART to an ESP32-S3 on Pmod JA (3.3 V): JA1 = FPGA RX, JA2 = FPGA TX, GND on pin 5 or 11
+NET "UartRx" LOC = "L15" | PULLUP;
+NET "UartTx" LOC = "K12";
