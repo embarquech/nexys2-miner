@@ -17,6 +17,26 @@ package sha256_pkg is
     x"19a4c116", x"1e376c08", x"2748774c", x"34b0bcb5", x"391c0cb3", x"4ed8aa4a", x"5b9cca4f", x"682e6ff3",
     x"748f82ee", x"78a5636f", x"84c87814", x"8cc70208", x"90befffa", x"a4506ceb", x"bef9a3f7", x"c67178f2");
 
+  -- Control state of a core and of a unit. The units run in lockstep, so
+  -- unit 0 (the master) owns these registers and the others follow it: XST
+  -- does not merge identical registers across units by itself.
+  type core_ctl_t is record
+    t       : unsigned(5 downto 0);
+    idx     : unsigned(3 downto 0);
+    running : std_logic;
+    short_r : std_logic;
+    done_r  : std_logic;
+  end record;
+  type unit_state_t is (ST_IDLE, ST_PASS1, ST_PASS2);
+  type unit_ctl_t is record
+    st     : unit_state_t;
+    pass2  : std_logic;
+    n      : unsigned(31 downto 0);
+    n_next : unsigned(31 downto 0);
+    tick   : std_logic;
+    core   : core_ctl_t;
+  end record;
+
   -- Initial hash value, H0 in the top 32 bits.
   constant IV : unsigned(255 downto 0) :=
     x"6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19";

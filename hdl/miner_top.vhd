@@ -6,11 +6,11 @@
 --   0x00       W   job port: 84 bytes written in a row (same address) shift in
 --                    midstate (32, H0 first), header bytes 64..75 (12),
 --                    first nonce word (4; header bytes 76..79 read big-endian,
---                    a multiple of 4 with 4 units; ignored with the UART link,
---                    which always starts at 0), hit mask (4, ANDed with
---                    H7 of the final hash; fixed at 20 bits with the UART
---                    link), state3 (32: second block a..h
---                    after rounds 0-2, sw/sha256_mid.state3)
+--                    a multiple of 4 with 4 units), hit mask (4, ANDed with
+--                    H7 of the final hash), state3 (32: second block a..h
+--                    after rounds 0-2, sw/sha256_mid.state3).
+--                  With the UART link the job is 76 bytes, without the first
+--                    nonce word (always 0) and the mask (fixed at 20 bits).
 --                  One address instead of 84 saves a byte decoder per byte.
 --   0x38       W   bit0 = restart and run, bit1 = stop
 --   0x39       R   bit0 = running, bit1 = hit pending
@@ -20,7 +20,7 @@
 --                  counter, read the clock after it stepped past the hit)
 --   0x44-0x47  R   nonce word unit 0 is hashing (0x44 snapshots all four)
 --   0x48       R   hits since restart (wraps; USB link only)
---   0x4E       R   magic 0xB7
+--   0x4E       R   magic: 0xB7 (84-byte job), 0xB8 (76-byte job, UART link)
 --   0x4F       R   NCORES
 -- The job is write-only; 0x3B reads back. The UART protocol is in
 -- uart_bridge.vhd.
@@ -59,7 +59,14 @@ architecture rtl of miner_top is
   type byte_array is array (natural range <>) of std_logic_vector(7 downto 0);
   type nonce_array is array (natural range <>) of unsigned(31 downto 0);
 
-  constant JOB_BYTES : positive := 84;
+  function job_bytes_f return positive is
+  begin
+    if HOST_UART then
+      return 76;
+    end if;
+    return 84;
+  end;
+  constant JOB_BYTES : positive := job_bytes_f;
   signal job    : std_logic_vector(JOB_BYTES * 8 - 1 downto 0) := (others => '0');
   signal lights : std_logic := '0';
 
@@ -97,6 +104,8 @@ architecture rtl of miner_top is
   signal kidxs       : kidx_array;
   signal k_shared    : unsigned(31 downto 0) := (others => '0');
   signal nonces      : nonce_array(0 to NCORES - 1);
+  type ctl_array is array (0 to NCORES - 1) of unit_ctl_t;
+  signal ctls        : ctl_array;
   signal firsts      : nonce_array(0 to NCORES - 1);
   signal found       : std_logic := '0';
   signal found_nonce : unsigned(31 downto 0) := (others => '0');
@@ -127,19 +136,21 @@ begin
   ---------------------------------------------------------------------------
   -- Job registers, unpacked
   ---------------------------------------------------------------------------
-  -- the first byte written ends at the top after all 84 have shifted in
-  midstate <= unsigned(job(671 downto 416));
-  tail     <= unsigned(job(415 downto 320));
-  first    <= unsigned(job(319 downto 288));
+  -- the first byte written ends at the top after all of them have shifted in
+  midstate <= unsigned(job(job'high downto job'high - 255));
+  tail     <= unsigned(job(job'high - 256 downto job'high - 351));
   -- With the UART link the hit threshold is fixed at 20 leading zero bits
   -- (~3 hits/s at 3.4 MH/s): a constant mask saves a 32-bit register compare
   -- per unit, and the ESP32 re-hashes every hit anyway, so it keeps a running
-  -- error count and forwards only the ones it wants.
+  -- error count and forwards only the ones it wants. The first nonce is
+  -- always 0, so neither is sent.
   g_mask_fixed : if HOST_UART generate
-    mask <= x"00F0FFFF";                     -- byte-swapped top 20 bits of the hash
+    first <= (others => '0');
+    mask  <= x"00F0FFFF";                    -- byte-swapped top 20 bits of the hash
   end generate;
   g_mask_reg : if not HOST_UART generate
-    mask <= unsigned(job(287 downto 256));
+    first <= unsigned(job(319 downto 288));
+    mask  <= unsigned(job(287 downto 256));
   end generate;
   state3   <= unsigned(job(255 downto 0));
 
@@ -160,8 +171,10 @@ begin
     g_add : if not HOST_UART and NCORES /= 4 generate
       firsts(i) <= first + i;            -- VHDL-93: no expressions in port maps
     end generate;
+    -- With 4 units, unit 0 runs the round counters and state machine for
+    -- all of them (they are in lockstep anyway): ~50 slices per follower.
     u : entity work.miner_unit
-      generic map (STEP => NCORES)
+      generic map (STEP => NCORES, MASTER => i = 0 or NCORES /= 4, UNIT => i)
       port map (
         clk       => clk,
         restart   => restart,
@@ -177,7 +190,9 @@ begin
         tick      => ticks(i),
         kidx      => kidxs(i),
         k_in      => k_shared,
-        nonce     => nonces(i));
+        nonce     => nonces(i),
+        ctl_in    => ctls(0),
+        ctl_out   => ctls(i));
   end generate;
 
   -- One K table for all units. They restart together and run identical state
@@ -275,7 +290,12 @@ begin
       when 16#46# => rd := std_logic_vector(snap(15 downto 8));
       when 16#47# => rd := std_logic_vector(snap(7 downto 0));
       when 16#48# => rd := std_logic_vector(hit_count);
-      when 16#4E# => rd := x"B7";
+      when 16#4E# =>
+        if HOST_UART then
+          rd := x"B8";
+        else
+          rd := x"B7";
+        end if;
       when 16#4F# => rd := std_logic_vector(to_unsigned(NCORES, 8));
       when others => null;
     end case;

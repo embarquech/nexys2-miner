@@ -38,6 +38,8 @@ use ieee.numeric_std.all;
 use work.sha256_pkg.all;
 
 entity sha256_core is
+  generic (
+    MASTER : boolean := true);                 -- false: take t, running... from ctl_in
   port (
     clk       : in  std_logic;
     abort     : in  std_logic;                 -- drops the block in progress
@@ -61,7 +63,9 @@ entity sha256_core is
     k_in      : in  word;                      -- K(t + 1) during round t
     done      : out std_logic;                 -- one-cycle pulse, hash_out valid
     busy      : out std_logic;                 -- running (also right after a chained load)
-    hash_out  : out unsigned(255 downto 0));   -- words 0, 4 raw; others ff_in + raw
+    hash_out  : out unsigned(255 downto 0);    -- words 0, 4 raw; others ff_in + raw
+    ctl_in    : in  core_ctl_t;                -- the master core's control registers
+    ctl_out   : out core_ctl_t);               -- this core's (the master's) registers
 end entity;
 
 architecture rtl of sha256_core is
@@ -88,11 +92,19 @@ architecture rtl of sha256_core is
   signal s5      : delay5_t;                   -- s5(k) = W(t - k)
   signal s8      : delay8_t;                   -- s8(k) = W(t - k)
   signal d14     : word;                       -- W(t - 14)
-  signal t       : unsigned(5 downto 0) := (others => '0');
-  signal idx     : unsigned(3 downto 0) := (others => '0');
-  signal running : std_logic := '0';
-  signal short_r : std_logic := '0';
-  signal done_r  : std_logic := '0';
+  -- Control registers (_q), and what the core runs on: its own in the
+  -- master, the master's in the others, whose own registers are then unused
+  -- and trimmed.
+  signal t_q       : unsigned(5 downto 0) := (others => '0');
+  signal idx_q     : unsigned(3 downto 0) := (others => '0');
+  signal running_q : std_logic := '0';
+  signal short_q   : std_logic := '0';
+  signal done_q    : std_logic := '0';
+  signal t       : unsigned(5 downto 0);
+  signal idx     : unsigned(3 downto 0);
+  signal running : std_logic;
+  signal short_r : std_logic;
+  signal done_r  : std_logic;
   signal hash_r  : unsigned(255 downto 0) := (others => '0');
   signal chain_load : std_logic;               -- pass 2's last round also loads pass 1
 
@@ -157,17 +169,17 @@ begin
       zc := csa_c(ys, yc, s0);
       an := csa_s(zs, zc, mj) + csa_c(zs, zc, mj);
 
-      done_r <= '0';
+      done_q <= '0';
       -- Capture with the last round instead of spending a clock on the
       -- feed-forward add (see the header comment for words 0 and 4).
       if running = '1' and (t = 63 or (short_r = '1' and t = 60)) then
-        done_r <= '1';
+        done_q <= '1';
         hash_r <= an & (sw(ff_in, 1) + a) & (sw(ff_in, 2) + b) & (sw(ff_in, 3) + c) &
                   en & (sw(ff_in, 5) + e) & (sw(ff_in, 6) + f) & (sw(ff_in, 7) + g);
       end if;
 
       if abort = '1' then
-        running <= '0';
+        running_q <= '0';
       elsif start = '1' or chain_load = '1' then
         -- Pass 1 starts from registers only (state3, the next nonce), so its
         -- load can share pass 2's last clock (chain_load): one clock less per
@@ -184,10 +196,10 @@ begin
           h <= iv_w(6);
           hkw  <= HK1_IV + mf1;
           dhkw <= DHK1_IV + mf1;
-          t   <= to_unsigned(1, 6);
-          idx <= to_unsigned(3, 4);
+          t_q <= to_unsigned(1, 6);
+          idx_q <= to_unsigned(3, 4);
           wn  <= msg_word;                     -- W2
-          short_r <= '1';
+          short_q <= '1';
         else                                   -- pass 1: state after round 2
           a <= sw(state_in, 0);
           b <= sw(state_in, 1);
@@ -199,12 +211,12 @@ begin
           h <= sw(state_in, 7);
           hkw  <= hk3 + mf1;
           dhkw <= dhk3 + mf1;
-          t   <= to_unsigned(3, 6);
-          idx <= to_unsigned(5, 4);
+          t_q <= to_unsigned(3, 6);
+          idx_q <= to_unsigned(5, 4);
           wn  <= x"80000000";                  -- W4, padding
-          short_r <= '0';
+          short_q <= '0';
         end if;
-        running <= '1';
+        running_q <= '1';
       elsif running = '1' then
         h <= g;
         g <= f;
@@ -225,10 +237,10 @@ begin
         else
           wn <= ssig1(d0) + s5(5) + ssig0(s8(13)) + d14;
         end if;
-        idx <= idx + 1;
-        t   <= t + 1;
+        idx_q <= idx + 1;
+        t_q <= t + 1;
         if t = 63 or (short_r = '1' and t = 60) then
-          running <= '0';
+          running_q <= '0';
         end if;
       end if;
     end if;
@@ -242,6 +254,14 @@ begin
   widx <= to_unsigned(2, 4) when start = '1' and short = '1' else
           to_unsigned(4, 4) when start = '1' else
           idx;
+  ctl_out <= (t => t_q, idx => idx_q, running => running_q, short_r => short_q, done_r => done_q);
+  g_master : if MASTER generate
+    t <= t_q; idx <= idx_q; running <= running_q; short_r <= short_q; done_r <= done_q;
+  end generate;
+  g_follow : if not MASTER generate
+    t <= ctl_in.t; idx <= ctl_in.idx; running <= ctl_in.running;
+    short_r <= ctl_in.short_r; done_r <= ctl_in.done_r;
+  end generate;
   done     <= done_r;
   busy     <= running;
   hash_out <= hash_r;

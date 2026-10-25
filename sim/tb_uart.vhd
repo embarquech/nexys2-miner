@@ -95,10 +95,10 @@ begin
     wait for 1 us;
     send(x"FF");                                     -- noise is ignored
     read_regs(16#4E#, 2, v16);
-    assert v16 = x"B704" report "bad magic/ncores" severity failure;
+    assert v16 = x"B804" report "bad magic/ncores" severity failure;
     report "magic ok, 4 units";
 
-    write_cmd(x"4A", 16#00#, MIDSTATE & TAIL & x"00000000" & x"000000FF" & STATE3);
+    write_cmd(x"4A", 16#00#, MIDSTATE & TAIL & STATE3);   -- 76-byte job
     write_regs(16#38#, x"01");
     loop
       read_regs(16#39#, 1, v8);

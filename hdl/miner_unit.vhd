@@ -19,7 +19,9 @@ use work.sha256_pkg.all;
 
 entity miner_unit is
   generic (
-    STEP : positive := 1);                    -- nonce increment (number of units)
+    STEP   : positive := 1;                   -- nonce increment (number of units)
+    MASTER : boolean := true;                 -- false: follow ctl_in (needs STEP = 4)
+    UNIT   : natural := 0);                   -- low nonce bits of a follower
   port (
     clk       : in  std_logic;
     restart   : in  std_logic;                -- pulse: abort, reload nonce from first
@@ -35,15 +37,24 @@ entity miner_unit is
     tick      : out std_logic;                -- one-cycle pulse per finished nonce
     kidx      : out unsigned(5 downto 0);     -- see sha256_core
     k_in      : in  unsigned(31 downto 0);
-    nonce     : out unsigned(31 downto 0));   -- nonce currently being hashed
+    nonce     : out unsigned(31 downto 0);    -- nonce currently being hashed
+    ctl_in    : in  unit_ctl_t;               -- the master unit's control registers
+    ctl_out   : out unit_ctl_t);
 end entity;
 
 architecture rtl of miner_unit is
-  type state_t is (ST_IDLE, ST_PASS1, ST_PASS2);
-  signal st         : state_t := ST_IDLE;
-  signal n          : unsigned(31 downto 0) := (others => '0');
-  signal n_next     : unsigned(31 downto 0) := (others => '0');   -- n + STEP
-  signal pass2      : std_logic := '0';
+  -- Control registers (_q) and what the unit runs on: its own in the master,
+  -- the master's in the followers (their own are then trimmed).
+  signal st_q       : unit_state_t := ST_IDLE;
+  signal n_q        : unsigned(31 downto 0) := (others => '0');
+  signal n_next_q   : unsigned(31 downto 0) := (others => '0');   -- n + STEP
+  signal pass2_q    : std_logic := '0';
+  signal tick_q     : std_logic := '0';
+  signal st         : unit_state_t;
+  signal n          : unsigned(31 downto 0);
+  signal n_next     : unsigned(31 downto 0);
+  signal pass2      : std_logic;
+  signal core_ctl   : core_ctl_t;
   signal core_start : std_logic;
   signal p2         : std_logic;                   -- pass the core is on or starting
   signal core_done  : std_logic;
@@ -57,14 +68,14 @@ architecture rtl of miner_unit is
   signal hash1_w0   : word;
   signal hash1_w4   : word;
   signal hit_r      : std_logic := '0';
-  signal tick_r     : std_logic := '0';
 
   function hw(v : unsigned(255 downto 0); i : natural) return word is
   begin
     return v(255 - 32 * i downto 224 - 32 * i);
   end;
 begin
-  core : entity work.sha256_core
+  sha : entity work.sha256_core
+    generic map (MASTER => MASTER)
     port map (
       clk      => clk,
       abort    => restart,
@@ -87,7 +98,9 @@ begin
       k_in     => k_in,
       done     => core_done,
       busy     => core_busy,
-      hash_out => core_hash);
+      hash_out => core_hash,
+      ctl_in   => ctl_in.core,
+      ctl_out  => core_ctl);
 
   -- Starts are combinational so no clock is lost between passes; in a done
   -- clock the muxes already select the pass about to start.
@@ -146,23 +159,23 @@ begin
   begin
     if rising_edge(clk) then
       hit_r      <= '0';
-      tick_r     <= '0';
-      n_next     <= n + STEP;                 -- settles long before pass 1 needs it
+      tick_q     <= '0';
+      n_next_q   <= n + STEP;                 -- settles long before pass 1 needs it
       if restart = '1' then
-        n     <= first;
-        pass2 <= '0';
-        st    <= ST_IDLE;
+        n_q     <= first;
+        pass2_q <= '0';
+        st_q    <= ST_IDLE;
       else
         case st is
           when ST_IDLE =>
             if enable = '1' then
-              pass2 <= '0';
-              st    <= ST_PASS1;
+              pass2_q <= '0';
+              st_q    <= ST_PASS1;
             end if;
           when ST_PASS1 =>
             if core_done = '1' then
-              pass2 <= '1';
-              st    <= ST_PASS2;
+              pass2_q <= '1';
+              st_q    <= ST_PASS2;
             end if;
           when ST_PASS2 =>
             if core_done = '1' then
@@ -171,13 +184,13 @@ begin
               if ((hw(IV, 7) + hw(core_hash, 4)) and mask) = 0 then
                 hit_r <= '1';
               end if;
-              n      <= n + STEP;
-              tick_r <= '1';
-              pass2  <= '0';
+              n_q     <= n + STEP;
+              tick_q  <= '1';
+              pass2_q <= '0';
               if enable = '1' then
-                st <= ST_PASS1;
+                st_q <= ST_PASS1;
               else
-                st <= ST_IDLE;
+                st_q <= ST_IDLE;
               end if;
             end if;
         end case;
@@ -186,6 +199,18 @@ begin
   end process;
 
   hit       <= hit_r;
-  tick      <= tick_r;
+  ctl_out <= (st => st_q, pass2 => pass2_q, n => n_q, n_next => n_next_q,
+              tick => tick_q, core => core_ctl);
+  g_master : if MASTER generate
+    st <= st_q; pass2 <= pass2_q; n <= n_q; n_next <= n_next_q;
+    tick <= tick_q;
+  end generate;
+  -- A follower hashes the master's nonce with its own number in the low bits
+  g_follow : if not MASTER generate
+    st <= ctl_in.st; pass2 <= ctl_in.pass2;
+    n      <= ctl_in.n(31 downto 2) & to_unsigned(UNIT mod 4, 2);
+    n_next <= ctl_in.n_next(31 downto 2) & to_unsigned(UNIT mod 4, 2);
+    tick <= ctl_in.tick;
+  end generate;
   nonce     <= n;
 end architecture;

@@ -36,6 +36,8 @@ use ieee.numeric_std.all;
 use work.sha256_pkg.all;
 
 entity sha256_core is
+  generic (
+    MASTER : boolean := true);                 -- unused: each core keeps its own control
   port (
     clk       : in  std_logic;
     abort     : in  std_logic;                 -- drops the block in progress
@@ -58,7 +60,9 @@ entity sha256_core is
     k_in      : in  word;                      -- K(t + 1) during round t
     done      : out std_logic;                 -- one-cycle pulse, hash_out valid
     busy      : out std_logic;                 -- running (also right after a chained load)
-    hash_out  : out unsigned(255 downto 0));   -- words 0, 4 raw; others ff_in + raw
+    hash_out  : out unsigned(255 downto 0);   -- words 0, 4 raw; others ff_in + raw
+    ctl_in    : in  core_ctl_t;                -- unused
+    ctl_out   : out core_ctl_t);
 end entity;
 
 architecture rtl of sha256_core is
@@ -215,4 +219,6 @@ begin
   done     <= done_r;
   busy     <= running;
   hash_out <= hash_r;
+  ctl_out <= (t => (others => '0'), idx => (others => '0'), running => '0',
+              short_r => '0', done_r => '0');
 end architecture;

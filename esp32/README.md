@@ -22,7 +22,8 @@ hashrate changes apply to stock ESP-Miner; the `/api/system/cores` hunk in
 - **`components/asic/nexys2.c`**: the driver. It talks to the FPGA over UART1
   (GPIO17/18, 921600 baud) with the protocol in `hdl/uart_bridge.vhd`:
   - on each job, builds the 80-byte header, computes the midstate and the state
-    after rounds 0-2, and sends the 84-byte job with one `J` command;
+    after rounds 0-2, and sends the job with one `J` command: 76 bytes, or 84
+    (with first nonce and hit mask) for bitstreams that report magic 0xB7;
   - polls for hits every 20 ms, re-hashes each one, counts wrong hashes (logged
     every 1000 hits) and passes hashes with 24+ leading zero bits to ESP-Miner
     (one every ~5 s: it fills the Shares page);

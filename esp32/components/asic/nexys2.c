@@ -20,9 +20,10 @@
 #include <string.h>
 
 static const char *TAG = "nexys2";
+static bool short_job;            // the bitstream takes the 76-byte job
 
 // FPGA register map (nexys2-miner/hdl/miner_top.vhd)
-#define REG_JOB      0x00     // 84-byte job port: midstate, tail, first, mask, state3
+#define REG_JOB      0x00     // job port: midstate, tail, [first, mask,] state3
 #define REG_CTRL     0x38
 #define REG_STATUS   0x39
 #define REG_CLEAR    0x3A
@@ -30,7 +31,8 @@ static const char *TAG = "nexys2";
 #define REG_FOUND    0x40
 #define REG_PROGRESS 0x44
 #define REG_MAGIC    0x4E
-#define MAGIC        0xB7
+#define MAGIC        0xB7     // 84-byte job (first nonce word and hit mask)
+#define MAGIC_SHORT  0xB8     // 76-byte job: nonce 0 and 20-bit mask built in
 
 #define CMD_WRITE 0x57
 #define CMD_JOB   0x4A           // write n bytes to one address
@@ -193,7 +195,7 @@ uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE)
 
     uint8_t id[2] = {0};
     xSemaphoreTake(fpga_lock, portMAX_DELAY);
-    bool ok = fpga_read(REG_MAGIC, id, 2) && id[0] == MAGIC;
+    bool ok = fpga_read(REG_MAGIC, id, 2) && (id[0] == MAGIC || id[0] == MAGIC_SHORT);
     if (!ok) {
         // TX and RX crossed the wrong way round is the usual wiring slip; the
         // pins are only a mux setting on the ESP32, so try them swapped.
@@ -205,7 +207,7 @@ uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE)
         uart_set_pin(UART_NUM_1, 18, 17, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
         vTaskDelay(pdMS_TO_TICKS(10));
         SERIAL_clear_buffer();
-        ok = fpga_read(REG_MAGIC, id, 2) && id[0] == MAGIC;
+        ok = fpga_read(REG_MAGIC, id, 2) && (id[0] == MAGIC || id[0] == MAGIC_SHORT);
         if (ok) {
             ESP_LOGW(TAG, "found with GPIO18 TX / GPIO17 RX: the wires are crossed, it works anyway");
         } else {
@@ -220,6 +222,7 @@ uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE)
         return 0;
     }
     ncores = id[1];
+    short_job = id[0] == MAGIC_SHORT;
     ESP_LOGI(TAG, "Nexys2 FPGA miner found, %u hashing units", ncores);
 
     NEXYS2_set_lights(!nvs_config_get_bool(NVS_CONFIG_FPGA_LIGHTS_OFF));
@@ -256,22 +259,29 @@ void NEXYS2_send_work(GlobalState * GLOBAL_STATE, bm_job * next_bm_job)
     uint32_t mid[8];
     sha256_midstate(header, mid);
 
-    // job port: midstate, header bytes 64..75, first nonce word, hit mask, state3
+    // job port: midstate, header bytes 64..75, first nonce word and hit mask
+    // (long job only), state3
     uint8_t regs[84];
+    size_t len = 0;
     for (int i = 0; i < 8; i++) {
         put_be32(regs + 4 * i, mid[i]);
     }
     memcpy(regs + 32, header + 64, 12);
-    put_be32(regs + 44, 0);
-    // The hash is read little-endian, so its top 32 bits are H7 byte-swapped.
-    uint32_t top = (uint32_t)(((1ULL << FPGA_HIT_BITS) - 1) << (32 - FPGA_HIT_BITS));
-    put_be32(regs + 48, __builtin_bswap32(top));
+    len = 44;
+    if (!short_job) {
+        put_be32(regs + 44, 0);
+        // The hash is read little-endian, so its top 32 bits are H7 byte-swapped.
+        uint32_t top = (uint32_t)(((1ULL << FPGA_HIT_BITS) - 1) << (32 - FPGA_HIT_BITS));
+        put_be32(regs + 48, __builtin_bswap32(top));
+        len = 52;
+    }
 
     uint32_t st3[8];
     sha256_state3(mid, header + 64, st3);
     for (int i = 0; i < 8; i++) {
-        put_be32(regs + 52 + 4 * i, st3[i]);
+        put_be32(regs + len + 4 * i, st3[i]);
     }
+    len += 32;
 
     uint8_t id = (job_id + 4) % 128;      // multiples of 4, as SYSTEM_clean_jobs_queue expects
 
@@ -285,7 +295,7 @@ void NEXYS2_send_work(GlobalState * GLOBAL_STATE, bm_job * next_bm_job)
 
     xSemaphoreTake(fpga_lock, portMAX_DELAY);
     bool ok = fpga_write_byte(REG_CTRL, 0x02)            // stop
-              && fpga_cmd_write(CMD_JOB, REG_JOB, regs, sizeof(regs))
+              && fpga_cmd_write(CMD_JOB, REG_JOB, regs, len)
               && fpga_write_byte(REG_CTRL, 0x01);       // restart from nonce word 0
     if (ok) {
         // A hit read after this point belongs to the new job: restart clears it.

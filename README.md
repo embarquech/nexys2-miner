@@ -13,7 +13,7 @@ times slower than a single Bitaxe Gamma, so this is a project about pushing a
 |---|---|
 | Hash rate | **3.39 MH/s** (4 units x 103.3 MHz / 122 clocks per nonce) |
 | Error rate | 0 wrong hashes over the bench runs (every hit is re-hashed by the ESP32) |
-| Device use | 99 % of slices, ~90 % of LUTs |
+| Device use | 98 % of slices, 86 % of LUTs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
 
 ## How it works
@@ -26,7 +26,7 @@ pool <-stratum-> ESP32-S3 (ESP-Miner + nexys2 driver) <-UART 921600-> FPGA
 
 The ESP32 builds each block header, computes the **midstate** (SHA-256 of the
 first 64 bytes, the same for every nonce) and the state after **rounds 0-2** of
-the second block (they only see header bytes 64..75), and sends an 84-byte job.
+the second block (they only see header bytes 64..75), and sends a 76-byte job.
 The FPGA only does the nonce-dependent work and reports back nonces whose hash
 has 20 leading zero bits. The ESP32 re-hashes each one, keeps a running count of
 wrong hashes, and passes the ones with 24 or more zero bits to ESP-Miner, which
@@ -49,7 +49,10 @@ per clock, **122 clocks per nonce**:
 - the message schedule lives in a delay line that maps to SRL16s, and the
   words a pass skips (W0-W2) are injected into it just before the rounds that
   tap them;
-- one K table in block RAM serves all units, which run in lockstep;
+- the units run in lockstep, so unit 0 owns the round counter, state machine
+  and nonce counter for all four, and one K table in block RAM serves them all
+  (XST does not merge identical registers across units by itself: sharing them
+  by hand saved ~600 LUTs and ~240 flip-flops);
 - the units split the nonce space: unit *i* hashes *i*, *i*+4, *i*+8, ...
 
 ### Clock
@@ -67,8 +70,8 @@ chip at room temperature runs 103 MHz without errors and starts failing around
   frequencies.
 
 PAR seeds matter: on the same design, the wrong-hash rate at 103 MHz ranged
-from 0 % to 10 % depending on the seed. The shipped bitstream is the best of
-several.
+from 0 % to 33 % depending on the seed. The shipped bitstream is the best of
+several (77.6 MHz worst case per the timing report, 0 wrong hashes at 103 MHz).
 
 ## Repository
 
@@ -160,6 +163,10 @@ without the board.
 - **A 2-stage pipeline** (two nonces interleaved per core): doubles the state
   registers, no room.
 - **Above ~106 MHz**: 25 % wrong hashes at 110 MHz, 79 % at 115 MHz.
+- **Chaining pass 2 onto pass 1's last round** (121 clocks): pass 2's first
+  state needs pass 1's last `a` plus the midstate plus a constant, two more
+  adder levels on the path that already sets the clock: -10 % clock for
+  +0.8 % fewer clocks.
 - **3 units overclocked**: the round's critical path does not shrink with
   fewer units; it would need ~138 MHz to match 4 units.
 
@@ -167,4 +174,5 @@ without the board.
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
 **3.39 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
-carry-save arithmetic, shared constants, and a lot of placement experiments.
+carry-save arithmetic, shared constants and control, and a lot of placement
+experiments.
