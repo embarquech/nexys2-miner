@@ -11,7 +11,7 @@ times slower than a single Bitaxe Gamma, so this is a project about pushing a
 
 | | |
 |---|---|
-| Hash rate | **3.39 MH/s** (4 units x 103.3 MHz / 122 clocks per nonce) |
+| Hash rate | **3.48 MH/s** (4 units x 106.25 MHz / 122 clocks per nonce) |
 | Error rate | 0 wrong hashes over the bench runs (every hit is re-hashed by the ESP32) |
 | Device use | 98 % of slices, 86 % of LUTs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
@@ -57,17 +57,22 @@ per clock, **122 clocks per nonce**:
 
 ### Clock
 
-The core clock comes from a DCM: 50 MHz x 31 / 15 = **103.3 MHz**. The timing
-tools only guarantee ~74 MHz worst case (slowest silicon, 85 degC); the real
-chip at room temperature runs 103 MHz without errors and starts failing around
-106-110 MHz. Two tricks get there:
+The core clock comes from a DCM: 50 MHz x 17 / 8 = **106.25 MHz**. The timing
+tools only guarantee 77.6 MHz worst case (slowest silicon, 85 degC); the real
+chip at room temperature runs 106.25 MHz without errors (0 in 900 hits) and
+starts failing just above (0.4 % at 106.7, 1.7 % at 107.7, 2.4 % at 108.3).
+Two tricks get there:
 
 - `ise/build.sh` can tell PAR the input clock is slower than it is (the
   `ts_ns` argument). Asked for the true target, PAR gives up and places far
-  worse; asked for ~90 MHz it places well, and the DCM still runs at 103 MHz.
-- `ise/refreq.sh` changes only the DCM multiplier/divider of an already placed
-  and routed design (through XDL), to measure the same placement at several
-  frequencies.
+  worse; asked for ~90 MHz it places well (77.6 MHz worst case; asked for 94
+  it gave 74.3, for 98 only 64.8).
+- the design is built at 31/15 (103.3 MHz), then
+  `ise/refreq.sh` changes only the DCM multiplier/divider of the placed and
+  routed design (through XDL): the same placement measured at several
+  frequencies, and the shipped one re-clocked to 17/8 (`prom` also writes the
+  PROM file). The UART divider still assumes 103.3 MHz, so the link runs 2.8 %
+  fast (947 kbaud), well within what a UART tolerates.
 
 PAR seeds matter: on the same design, the wrong-hash rate at 103 MHz ranged
 from 0 % to 33 % depending on the seed. The shipped bitstream is the best of
@@ -162,7 +167,8 @@ without the board.
   (104-105 %), whatever the region shapes.
 - **A 2-stage pipeline** (two nonces interleaved per core): doubles the state
   registers, no room.
-- **Above ~106 MHz**: 25 % wrong hashes at 110 MHz, 79 % at 115 MHz.
+- **Above 106.25 MHz**: wrong hashes eat the gain (see Clock); on older
+  builds 25 % at 110 MHz, 79 % at 115 MHz.
 - **Chaining pass 2 onto pass 1's last round** (121 clocks): pass 2's first
   state needs pass 1's last `a` plus the midstate plus a constant, two more
   adder levels on the path that already sets the clock: -10 % clock for
@@ -173,6 +179,6 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-**3.39 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
+3.39 -> **3.48 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
 carry-save arithmetic, shared constants and control, and a lot of placement
 experiments.
