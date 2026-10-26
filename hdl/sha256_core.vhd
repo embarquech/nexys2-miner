@@ -183,7 +183,7 @@ begin
   -- later, registered as r13 = W(t - 13) one more clock on, and port B,
   -- read at wptr - 3, gives W(t - 3) a clock later, registered as r5 =
   -- W(t - 5).
-  wram_en    <= start or running;
+  wram_en    <= '1';                           -- the ring turns every clock too
   wram_addra <= "00000" & std_logic_vector(wptr);
   wram_addrb <= "00000" & std_logic_vector(wptr + 8) when wptr < 3 else
                 "00000" & std_logic_vector(wptr - 3);
@@ -202,32 +202,31 @@ begin
   process (clk)
   begin
     if rising_edge(clk) then
-      if start = '1' or running = '1' then
-        if start = '1' or chain_load = '1' then
-          d0 <= mf1_e;                         -- the first round's W
-        else
-          d0 <= wn;
+      -- every clock, as the datapath
+      if start = '1' or chain_load = '1' then
+        d0 <= mf1_e;                         -- the first round's W
+      else
+        d0 <= wn;
+      end if;
+      if wptr = 10 then
+        wptr <= (others => '0');
+      else
+        wptr <= wptr + 1;
+      end if;
+      r5  <= unsigned(wram_dob);
+      r13 <= unsigned(wram_doa);
+      d14 <= r13;
+      -- Taps reaching before the first pushed word: pass 1 needs
+      -- (W(t-13), W(t-14)) = (W1, W0) at t = 14 and (W2, W1) at 15, then
+      -- W2 at 16, which the ring brings along by itself; pass 2 only
+      -- needs W0 at t = 14.
+      if running = '1' and t = 13 then
+        d14 <= ovw0_e;
+        if short_r = '0' then
+          r13 <= ovw1;
         end if;
-        if wptr = 10 then
-          wptr <= (others => '0');
-        else
-          wptr <= wptr + 1;
-        end if;
-        r5  <= unsigned(wram_dob);
-        r13 <= unsigned(wram_doa);
-        d14 <= r13;
-        -- Taps reaching before the first pushed word: pass 1 needs
-        -- (W(t-13), W(t-14)) = (W1, W0) at t = 14 and (W2, W1) at 15, then
-        -- W2 at 16, which the ring brings along by itself; pass 2 only
-        -- needs W0 at t = 14.
-        if running = '1' and t = 13 then
-          d14 <= ovw0_e;
-          if short_r = '0' then
-            r13 <= ovw1;
-          end if;
-        elsif running = '1' and t = 14 and short_r = '0' then
-          r13 <= ovw2;
-        end if;
+      elsif running = '1' and t = 14 and short_r = '0' then
+        r13 <= ovw2;
       end if;
     end if;
   end process;
@@ -276,9 +275,11 @@ begin
         h7_r <= en;
       end if;
 
-      if abort = '1' then
-        running_q <= '0';
-      elsif start = '1' or chain_load = '1' then
+      -- The datapath runs every clock, loaded or not: what it computes while
+      -- the core is idle is never used, and without a hold every register
+      -- loses an input (IV constant / job word / shift fits one LUT).
+      -- Only the control registers below look at running and abort.
+      if start = '1' or chain_load = '1' then
         -- Pass 1 starts from registers only (state3, the next nonce), so its
         -- load can share pass 2's last clock (chain_load): one clock less per
         -- nonce. Pass 2 cannot do that after pass 1, it needs pass 1's last a.
@@ -291,10 +292,7 @@ begin
           f <= iv_w(4);
           g <= iv_w(5);
           h <= iv_w(6);
-          t_q <= to_unsigned(1, 6);
-          idx_q <= to_unsigned(3, 4);
           wn  <= ram_w;                        -- W2
-          short_q <= '1';
         else                                   -- pass 1: state after round 2
           a <= sw(state_in, 0);
           b <= sw(state_in, 1);
@@ -304,15 +302,11 @@ begin
           f <= sw(state_in, 5);
           g <= sw(state_in, 6);
           h <= sw(state_in, 7);
-          t_q <= to_unsigned(3, 6);
-          idx_q <= to_unsigned(5, 4);
           wn  <= x"80000000";                  -- W4, padding
-          short_q <= '0';
         end if;
-        hkw       <= hkw_ld;
-        dhkw      <= dhkw_ld;
-        running_q <= '1';
-      elsif running = '1' then
+        hkw  <= hkw_ld;
+        dhkw <= dhkw_ld;
+      else
         h <= g;
         g <= f;
         f <= e;
@@ -336,6 +330,22 @@ begin
         else
           wn <= ssig1(d0) + r5 + ssig0(r13) + d14;
         end if;
+      end if;
+
+      if abort = '1' then
+        running_q <= '0';
+      elsif start = '1' or chain_load = '1' then
+        if ld_p2 = '1' then
+          t_q     <= to_unsigned(1, 6);
+          idx_q   <= to_unsigned(3, 4);
+          short_q <= '1';
+        else
+          t_q     <= to_unsigned(3, 6);
+          idx_q   <= to_unsigned(5, 4);
+          short_q <= '0';
+        end if;
+        running_q <= '1';
+      elsif running = '1' then
         idx_q <= idx + 1;
         t_q <= t + 1;
         if t = 63 or (short_r = '1' and t = 60) then
