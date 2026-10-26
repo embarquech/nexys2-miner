@@ -11,8 +11,8 @@ pushing a 2007 FPGA as far as it goes, not about earning anything.
 
 | | |
 |---|---|
-| Hash rate | **5.25 MH/s** (6 units x 106.67 MHz / 122 clocks per nonce) |
-| Error rate | 0 wrong hashes in 2000 checked over 10 minutes (every hit is re-hashed by the ESP32) |
+| Hash rate | **5.33 MH/s** (6 units x 108.33 MHz / 122 clocks per nonce); 5.25 MH/s in the zero-error version |
+| Error rate | 0.37 % wrong hashes (0 at 106.67 MHz), re-hashed and dropped by the ESP32 |
 | Device use | 99 % of slices, 88 % of LUTs, 13 of 20 block RAMs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
 
@@ -76,9 +76,10 @@ per clock, **122 clocks per nonce**:
 
 ### Clock
 
-The core clock comes from a DCM: 50 MHz x 32 / 15 = **106.67 MHz**. The timing
-tools only guarantee 78.5 MHz worst case (slowest silicon, 85 degC); the real
-chip at room temperature runs it without errors. PAR runs at high effort with
+The core clock comes from a DCM: 50 MHz x 13 / 6 = **108.33 MHz**, with
+0.37 % wrong hashes, or x 32 / 15 = 106.67 MHz with none (the two bitstreams,
+see [`REBUILD.md`](REBUILD.md)). The timing tools only guarantee 78.5 MHz
+worst case (slowest silicon, 85 degC). PAR runs at high effort with
 extra effort (`PAROPT="-ol high -xe n"`): the same design and seed at the
 default effort placed for 76.7 MHz and held 106.25 MHz. Six units fill the chip
 (99 % of slices), so they run slower than five, but the sixth more than pays
@@ -86,8 +87,9 @@ for it, and every LUT freed or placement constraint dropped still shows:
 
 | Build | Clock | Wrong hashes (2 min) | Useful rate |
 |---|---|---|---|
+| 6 units, PAR high + extra effort | **108.33 MHz** | **0.37 %** (11 in 3000 over 10 min) | **5.31 MH/s** |
 | 6 units, PAR high + extra effort | **106.67 MHz** | **0** (0 in 2000 over 10 min) | **5.25 MH/s** |
-| 6 units, PAR high + extra effort | 107.1 MHz | 0 in 2 min, but 5 in 3000 over 10 min | not kept |
+| 6 units, PAR high + extra effort | 107.1 / 110 MHz | 0.17 % / 2.4 % over 10 min | 5.26 / 5.28 MH/s |
 | 6 units, free-running datapath, PAR standard effort | 103.3 - 106.25 MHz | 0 (0 in 3000 over 10 min) | 5.08 - 5.23 MH/s |
 | 6 units, free-running datapath, PAR standard effort | 107.1 / 108.3 / 110 MHz | 1 / 2 / 4 | not kept |
 | 6 units, schedule in block RAM (8214 LUTs) | 103.3 MHz | ~1 % | ~5.03 MH/s |
@@ -109,8 +111,8 @@ Two tricks get there:
 - the design is built at 31/15 (103.3 MHz), then
   `ise/refreq.sh` changes only the DCM multiplier/divider of the placed and
   routed design (through XDL): the same placement measured at several
-  frequencies, and the shipped one re-clocked to 32/15 (`prom` also writes
-  the PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
+  frequencies, and the shipped ones re-clocked to 13/6 and 32/15 (`prom`
+  also writes the PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
   the same ratio; the ESP32 driver scans for the baud rate if 921600 gets no
   answer, so any re-clocked bitstream works.
 
@@ -128,7 +130,7 @@ design; [`REBUILD.md`](REBUILD.md) has the exact recipe.
 | `sw/` | Python host for a PC over USB: `miner.py` (stratum client, self-test, stress test), `fpga.py`, `jtagprog.py` (load a `.bit` over JTAG), `svfplay.py` (play an SVF, used to write the PROM), `cpu_miner.py` |
 | `ise/` | `build.sh` (command-line ISE flow), `refreq.sh`, `probe.sh`, `sites.sh`, `geom.sh`, floorplan experiments |
 | `esp32/` | The ESP-Miner changes: patch, driver sources, NVS config template |
-| `bitstreams/` | The shipped UART build: `.bit` for JTAG, `.svf` for the PROM |
+| `bitstreams/` | The shipped UART build, `.bit` for JTAG and `.svf` for the PROM: `nexys2-miner-uart` (108.33 MHz) and `nexys2-miner-uart-zero-errors` (106.67 MHz) |
 | `hardware/case/` | 3D-printable case for the board: `nexys2_tray.stl` and `nexys2_lid.stl` |
 
 ## Hardware
@@ -169,7 +171,7 @@ Inside the VM:
 ```bash
 # part, units, Area, DCM mul/div, tag, PAR input period (ns), seed, host link, display, round
 PAROPT="-ol high -xe n" bash ise/build.sh xc3s500e-fg320-4 6 Area 31 15 mybuild 22.94 5 uart nodisplay plain
-bash ise/refreq.sh 32 15 mybuild107 /tmp/nexys2-build/miner_top.ncd prom  # re-clock to 106.67 MHz
+bash ise/refreq.sh 13 6 mybuild108 /tmp/nexys2-build/miner_top.ncd prom   # re-clock to 108.33 MHz
 # -> ise/out/mybuild.bit (JTAG) and ise/out/mybuild.svf (PROM)
 ```
 
@@ -183,6 +185,7 @@ units; `display` builds take fewer units.
 cd sw
 python jtagprog.py ..\bitstreams\nexys2-miner-uart.bit   # into the FPGA, until power-off
 python svfplay.py  ..\bitstreams\nexys2-miner-uart.svf   # into the PROM (~40 s, verified)
+# or nexys2-miner-uart-zero-errors.bit/.svf: 106.67 MHz, no wrong hashes
 ```
 
 `jtagprog.py` and `svfplay.py` only need `djtg.dll` from the Adept Runtime,
@@ -240,7 +243,7 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> 4.92 -> 5.08 -> 5.23 -> **5.25 MH/s**
+3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> 4.92 -> 5.08 -> 5.23 -> 5.25 -> **5.33 MH/s**
 
 Four units instead of three, a DCM, folding and skipping rounds, carry-save
 arithmetic, shared constants and control; then pass 1's hash in block RAM,
