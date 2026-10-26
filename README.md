@@ -98,6 +98,7 @@ several (77.6 MHz worst case per the timing report, 0 wrong hashes at 103 MHz).
 | `ise/` | `build.sh` (command-line ISE flow), `refreq.sh`, `probe.sh`, `sites.sh`, `geom.sh`, floorplan experiments |
 | `esp32/` | The ESP-Miner changes: patch, driver sources, NVS config template |
 | `bitstreams/` | The shipped UART build: `.bit` for JTAG, `.svf` for the PROM |
+| `hardware/case/` | 3D-printable case for the board: `nexys2_tray.stl` and `nexys2_lid.stl` |
 
 ## Hardware
 

@@ -3,3 +3,4 @@
 *.patch text eol=lf
 *.svf   text eol=lf
 *.bit   binary
+*.stl   text eol=lf
