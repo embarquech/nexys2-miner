@@ -67,5 +67,5 @@ Without Wi-Fi in NVS it opens its `Bitaxe_XXXX` access point like any Bitaxe.
 
 Notes: keep `selftest` unset (it would fail on the missing sensors); the
 `frequency` setting is informative only, the FPGA clock is fixed by the
-bitstream (112 for the shipped one, 112.5 MHz, the default). The expected hash rate
+bitstream (114 for the shipped one, 114.3 MHz, the default). The expected hash rate
 is frequency x units / 122.

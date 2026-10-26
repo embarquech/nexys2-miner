@@ -11,7 +11,7 @@ times slower than a single Bitaxe Gamma, so this is a project about pushing a
 
 | | |
 |---|---|
-| Hash rate | **4.61 MH/s** (5 units x 112.5 MHz / 122 clocks per nonce) |
+| Hash rate | **4.68 MH/s** (5 units x 114.3 MHz / 122 clocks per nonce) |
 | Error rate | 0 wrong hashes over the bench runs (every hit is re-hashed by the ESP32) |
 | Device use | 89 % of slices, 77 % of LUTs, 6 of 20 block RAMs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
@@ -70,17 +70,18 @@ per clock, **122 clocks per nonce**:
 
 ### Clock
 
-The core clock comes from a DCM: 50 MHz x 9 / 4 = **112.5 MHz**. The timing
+The core clock comes from a DCM: 50 MHz x 16 / 7 = **114.3 MHz**. The timing
 tools only guarantee 78.6 MHz worst case (slowest silicon, 85 degC); the real
 chip at room temperature runs it without errors:
 
 | Clock | Wrong hashes (2 min) | Useful rate |
 |---|---|---|
-| 103.3 - 112.5 MHz | 0 | 4.24 - 4.61 MH/s |
+| 103.3 - 114.3 MHz | 0 | 4.24 - 4.68 MH/s |
 | 115 MHz | ~1 % | ~4.67 MH/s |
 | 116.7 MHz | ~20 % | ~3.8 MH/s |
 
-The shipped clock leaves a step of margin below the edge. Fewer LUTs mattered
+The shipped clock is the last DCM step below the edge; 113.6 MHz (25/11)
+keeps a little more margin for a warm, closed case. Fewer LUTs mattered
 more than any logic trick: the same design at 94 % of slices placed for
 67 MHz worst case, at 89 % for 78.6. Two tricks get there:
 
@@ -91,7 +92,7 @@ more than any logic trick: the same design at 94 % of slices placed for
 - the design is built at 31/15 (103.3 MHz), then
   `ise/refreq.sh` changes only the DCM multiplier/divider of the placed and
   routed design (through XDL): the same placement measured at several
-  frequencies, and the shipped one re-clocked to 9/4 (`prom` also writes the
+  frequencies, and the shipped one re-clocked to 16/7 (`prom` also writes the
   PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
   the same ratio; the ESP32 driver scans for the baud rate if 921600 gets no
   answer, so any re-clocked bitstream works.
@@ -146,7 +147,7 @@ Inside the VM:
 ```bash
 # part, units, Area, DCM mul/div, tag, PAR input period (ns), seed, host link, display, round
 bash ise/build.sh xc3s500e-fg320-4 5 Area 31 15 mybuild 22.94 3 uart nodisplay plain
-bash ise/refreq.sh 9 4 mybuild112 /tmp/nexys2-build/miner_top.ncd prom  # re-clock to 112.5 MHz
+bash ise/refreq.sh 16 7 mybuild114 /tmp/nexys2-build/miner_top.ncd prom  # re-clock to 114.3 MHz
 # -> ise/out/mybuild.bit (JTAG) and ise/out/mybuild.svf (PROM)
 ```
 
@@ -203,6 +204,6 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-3.39 -> 3.48 -> 4.10 -> **4.61 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
+3.39 -> 3.48 -> 4.10 -> 4.61 -> **4.68 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
 carry-save arithmetic, shared constants and control, pass 1's hash in block
 RAM for a fifth unit, and a lot of placement experiments.
