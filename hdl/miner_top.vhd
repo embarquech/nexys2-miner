@@ -315,7 +315,9 @@ begin
       -- Hits: the lowest-numbered unit wins if several land on the same clock.
       for i in NCORES - 1 downto 0 loop
         if hits(i) = '1' and found = '0' then
-          found_nonce <= nonces(i);
+          -- A unit's nonce is unit 0's with its number in the low bits, so
+          -- only those are picked (a 32-bit mux across units otherwise).
+          found_nonce <= nonces(0)(31 downto STEP_BITS) & to_unsigned(i, STEP_BITS);
         end if;
       end loop;
       if hits /= (hits'range => '0') then

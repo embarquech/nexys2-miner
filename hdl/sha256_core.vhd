@@ -33,7 +33,11 @@
 -- The message is read one word per clock: widx says which word is wanted on
 -- msg_word (the padding constants; pass 2's hash words come from the RAM).
 -- The schedule history only needs W(t), W(t-5), W(t-13) and W(t-14), so it
--- lives in a delay line that XST maps to SRL16s. The words a pass skips
+-- lives in a second block RAM used as a ring of 11 words:
+-- port A writes W(t) and reads back (READ_FIRST) the word written 11 pushes
+-- earlier, port B reads W(t-5) ahead; both outputs are registered, so the
+-- RAM's clock-to-out stays out of the W adders. That replaces two SRL16
+-- columns per core. The words a pass skips
 -- (W0-W2 in pass 1, W0 in pass 2) never enter it; they are written into the
 -- last two stages of the line just before the rounds that tap them (pass 1's
 -- from ovw0..ovw2, pass 2's W0 from the RAM).
@@ -83,8 +87,6 @@ entity sha256_core is
 end entity;
 
 architecture rtl of sha256_core is
-  type delay5_t is array (1 to 5) of word;
-  type delay8_t is array (6 to 13) of word;
 
   function iv_w(i : natural) return word is
   begin
@@ -99,9 +101,14 @@ architecture rtl of sha256_core is
   signal dhkw    : word;                       -- d + h + K(t) + W(t)
   signal wn      : word;                       -- W(t + 1)
   signal d0      : word;                       -- W(t)
-  signal s5      : delay5_t;                   -- s5(k) = W(t - k)
-  signal s8      : delay8_t;                   -- s8(k) = W(t - k)
+  signal r5      : word;                       -- W(t - 5)
+  signal r13     : word;                       -- W(t - 13)
   signal d14     : word;                       -- W(t - 14)
+  signal wptr    : unsigned(3 downto 0) := (others => '0');   -- ring position, mod 11
+  signal wram_en : std_logic;
+  signal wram_doa, wram_dob : std_logic_vector(31 downto 0);
+  signal wram_addra, wram_addrb : std_logic_vector(8 downto 0);
+  signal wram_dia : std_logic_vector(31 downto 0);
   -- Control registers (_q), and what the core runs on: its own in the
   -- master, the master's in the others, whose own registers are then unused
   -- and trimmed.
@@ -171,7 +178,27 @@ architecture rtl of sha256_core is
     return v(255 - 32 * i downto 224 - 32 * i);
   end;
 begin
-  -- Schedule delay line: no reset and a single enable, so it maps to SRL16.
+  -- Schedule history. Every clock that shifts (a load or a round) pushes
+  -- W(t) at wptr; counted in pushes, port A gives back W(t - 11) a clock
+  -- later, registered as r13 = W(t - 13) one more clock on, and port B,
+  -- read at wptr - 3, gives W(t - 3) a clock later, registered as r5 =
+  -- W(t - 5).
+  wram_en    <= start or running;
+  wram_addra <= "00000" & std_logic_vector(wptr);
+  wram_addrb <= "00000" & std_logic_vector(wptr + 8) when wptr < 3 else
+                "00000" & std_logic_vector(wptr - 3);
+  wram_dia   <= std_logic_vector(d0);
+  wram : RAMB16_S36_S36
+    generic map (WRITE_MODE_A => "READ_FIRST", WRITE_MODE_B => "READ_FIRST")
+    port map (
+      DOA => wram_doa, DOB => wram_dob, DOPA => open, DOPB => open,
+      ADDRA => wram_addra, ADDRB => wram_addrb,
+      CLKA => clk, CLKB => clk,
+      DIA => wram_dia, DIB => (others => '0'),
+      DIPA => "0000", DIPB => "0000",
+      ENA => wram_en, ENB => wram_en, SSRA => '0', SSRB => '0',
+      WEA => wram_en, WEB => '0');
+
   process (clk)
   begin
     if rising_edge(clk) then
@@ -181,27 +208,25 @@ begin
         else
           d0 <= wn;
         end if;
-        s5(1) <= d0;
-        for k in 2 to 5 loop
-          s5(k) <= s5(k - 1);
-        end loop;
-        s8(6) <= s5(5);
-        for k in 7 to 12 loop
-          s8(k) <= s8(k - 1);
-        end loop;
-        s8(13) <= s8(12);
-        d14    <= s8(13);
+        if wptr = 10 then
+          wptr <= (others => '0');
+        else
+          wptr <= wptr + 1;
+        end if;
+        r5  <= unsigned(wram_dob);
+        r13 <= unsigned(wram_doa);
+        d14 <= r13;
         -- Taps reaching before the first pushed word: pass 1 needs
         -- (W(t-13), W(t-14)) = (W1, W0) at t = 14 and (W2, W1) at 15, then
-        -- W2 at 16, which the shift brings along by itself; pass 2 only
+        -- W2 at 16, which the ring brings along by itself; pass 2 only
         -- needs W0 at t = 14.
         if running = '1' and t = 13 then
           d14 <= ovw0_e;
           if short_r = '0' then
-            s8(13) <= ovw1;
+            r13 <= ovw1;
           end if;
         elsif running = '1' and t = 14 and short_r = '0' then
-          s8(13) <= ovw2;
+          r13 <= ovw2;
         end if;
       end if;
     end if;
@@ -309,7 +334,7 @@ begin
             wn <= msg_word;                    -- padding
           end if;
         else
-          wn <= ssig1(d0) + s5(5) + ssig0(s8(13)) + d14;
+          wn <= ssig1(d0) + r5 + ssig0(r13) + d14;
         end if;
         idx_q <= idx + 1;
         t_q <= t + 1;

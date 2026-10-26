@@ -15,7 +15,7 @@ fbstratumuser,data,string,YOUR_POOL_USER.nexys2
 fbstratumpass,data,string,d=10
 fbstratumdiff,data,u16,10
 fbstratumxnsum,data,u16,0
-asicfrequency,data,u16,100
+asicfrequency,data,u16,103
 asicvoltage,data,u16,1200
 autofanspeed,data,u16,0
 fanspeed,data,u16,0

@@ -11,9 +11,9 @@ times slower than a single Bitaxe Gamma, so this is a project about pushing a
 
 | | |
 |---|---|
-| Hash rate | **4.92 MH/s** (6 units x 100 MHz / 122 clocks per nonce) |
-| Error rate | 0 wrong hashes over the bench runs (every hit is re-hashed by the ESP32) |
-| Device use | 99 % of slices, 91 % of LUTs, 7 of 20 block RAMs |
+| Hash rate | **5.08 MH/s** (6 units x 103.3 MHz / 122 clocks per nonce) |
+| Error rate | ~1 % wrong hashes, re-hashed and dropped by the ESP32 (~5.03 MH/s useful) |
+| Device use | 99 % of slices, 88 % of LUTs, 13 of 20 block RAMs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
 
 ## How it works
@@ -55,9 +55,11 @@ per clock, **122 clocks per nonce**:
   unit smaller than the carry-save round (`csa`, one chain each for `a` and
   `e`, which the 4-unit builds used); `h+K+W` is computed one round ahead, and
   pass 2's round-0 sums with the midstate once per job;
-- the message schedule lives in a delay line that maps to SRL16s, and the
-  words a pass skips (W0-W2) are injected into it just before the rounds that
-  tap them;
+- the message schedule lives in a second block RAM per unit, a ring of 11
+  words: port A writes W(t) and reads back W(t-11) (READ_FIRST), port B reads
+  W(t-3) ahead, both registered into W(t-13) and W(t-5); the words a pass
+  skips (W0-W2) are injected into those registers just before the rounds that
+  tap them (two SRL16 columns per unit less);
 - the units run in lockstep, so unit 0 owns the round counter, state machine
   and nonce counter for all of them, and one K table in block RAM serves them
   all (XST does not merge identical registers across units by itself: sharing
@@ -70,15 +72,17 @@ per clock, **122 clocks per nonce**:
 
 ### Clock
 
-The core clock comes from a DCM: 50 MHz x 2 = **100 MHz**. The timing tools
-only guarantee 69.8 MHz worst case (slowest silicon, 85 degC); the real chip
-at room temperature runs it without errors. Six units fill the chip (99 % of
-slices), so they run slower than five, but the sixth more than pays for it:
+The core clock comes from a DCM: 50 MHz x 31 / 15 = **103.3 MHz**. The timing
+tools only guarantee 72.3 MHz worst case (slowest silicon, 85 degC); the real
+chip at room temperature runs it with ~1 % wrong hashes. Six units fill the
+chip (99 % of slices), so they run slower than five, but the sixth more than
+pays for it, and every LUT freed still shows:
 
 | Build | Clock | Wrong hashes (2 min) | Useful rate |
 |---|---|---|---|
-| 6 units | **100 MHz** | **0** | **4.92 MH/s** |
-| 6 units | 103.3 MHz | ~7 % | ~4.74 MH/s |
+| 6 units, schedule in block RAM (8214 LUTs) | **103.3 MHz** | **~1 %** | **~5.03 MH/s** |
+| 6 units, schedule in SRL16s (8554 LUTs) | 103.3 MHz | ~7 % | ~4.74 MH/s |
+| 6 units, schedule in SRL16s | 100 MHz | 0 | 4.92 MH/s |
 | 5 units (89 % of slices, 78.6 MHz worst case) | 114.3 MHz | 0 | 4.68 MH/s |
 | 5 units | 115 MHz | ~1 % | ~4.67 MH/s |
 | 5 units | 116.7 MHz | ~20 % | ~3.8 MH/s |
@@ -92,11 +96,10 @@ Two tricks get there:
   `ts_ns` argument). Asked for the true target, PAR gives up and places far
   worse; asked for ~90 MHz it places well (77.6 MHz worst case; asked for 94
   it gave 74.3, for 98 only 64.8).
-- the design is built at 31/15 (103.3 MHz), then
+- the design is built at 31/15 (103.3 MHz, the shipped clock), then
   `ise/refreq.sh` changes only the DCM multiplier/divider of the placed and
   routed design (through XDL): the same placement measured at several
-  frequencies, and the shipped one re-clocked to 2/1 (`prom` also writes the
-  PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
+  frequencies (`prom` also writes the PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
   the same ratio; the ESP32 driver scans for the baud rate if 921600 gets no
   answer, so any re-clocked bitstream works.
 
@@ -150,7 +153,7 @@ Inside the VM:
 ```bash
 # part, units, Area, DCM mul/div, tag, PAR input period (ns), seed, host link, display, round
 bash ise/build.sh xc3s500e-fg320-4 6 Area 31 15 mybuild 22.94 5 uart nodisplay plain
-bash ise/refreq.sh 2 1 mybuild100 /tmp/nexys2-build/miner_top.ncd prom   # re-clock to 100 MHz
+bash ise/refreq.sh 2 1 mybuild100 /tmp/nexys2-build/miner_top.ncd prom   # optional: re-clock to 100 MHz
 # -> ise/out/mybuild.bit (JTAG) and ise/out/mybuild.svf (PROM)
 ```
 
@@ -207,7 +210,7 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> **4.92 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
+3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> 4.92 -> **5.08 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
 carry-save arithmetic, shared constants and control, pass 1's hash in block
 RAM, then smaller adders and the ESP32 doing the per-job sums for a fifth
 and a sixth unit, and a lot of placement experiments.
