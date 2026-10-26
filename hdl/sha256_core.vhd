@@ -10,10 +10,10 @@
 --
 -- Pass 1's hash is never captured. Its words are the last four values of a
 -- and of e: they are written into a block RAM, two per clock (one per port),
--- as they come out of the last rounds, the midstate word added on the way
--- in (a register feeds that adder; on the way out the RAM's slow
--- clock-to-out would be followed by an adder), and pass 2 reads them back as
--- message words W3-W7 and W0.
+-- as they come out of the last rounds, raw, and pass 2 reads them back
+-- into a register and adds the midstate word there (mid_w): one adder per
+-- core instead of one per port, and the RAM's slow clock-to-out never sits in
+-- front of it.
 -- W0-W2 are read from the registers in the load clock, when the whole hash is
 -- still in a..h. This replaces a 256-bit capture register, its six adders and
 -- an 8-way word mux per core. The one clash, three accesses in the load clock,
@@ -58,17 +58,14 @@ entity sha256_core is
     state_in  : in  unsigned(255 downto 0);    -- pass 1: state after round 2
     hk3       : in  word;                      -- pass 1: h + K(3) of state_in
     dhk3      : in  word;                      -- pass 1: d + h + K(3) of state_in
-    mid0      : in  word;                      -- midstate words 0 to 3
-    mid1      : in  word;
-    mid2      : in  word;
-    mid3      : in  word;
+    mid1      : in  word;                      -- midstate word 1
     a1m       : in  word;                      -- per job: pass 2's a and e after round 0
     e1m       : in  word;                      -- are a1m / e1m + raw a of pass 1 (W0 = mid0 + a),
     hk1m      : in  word;                      -- its h + K(1) + W1 and d + h + K(1) + W1 are
     dhk1m     : in  word;                      -- hk1m / dhk1m + raw b (W1 = mid1 + b)
-    mid_e     : in  word;                      -- midstate word for the e value written this
-                                               -- clock: 7, 6, 5, 4 in rounds 61-63 and the
-                                               -- load (registered, shared by cores in lockstep)
+    mid_w     : in  word;                      -- midstate word of the W read this clock:
+                                               -- 2 in the load clock, 3..7 in rounds 1-5,
+                                               -- 0 in round 13 (registered, shared)
     mf1       : in  word;                      -- pass 1: W3, the nonce, read on start / chain
     chain     : in  std_logic;                 -- start pass 1 straight from pass 2's last round
     widx      : out unsigned(3 downto 0);      -- index of the word wanted on msg_word
@@ -124,8 +121,8 @@ architecture rtl of sha256_core is
   signal ram_wea, ram_web : std_logic;
   signal ram_addrb : unsigned(3 downto 0);
   signal ram_w   : word;                       -- pass 2's W for wn: W2 in the load clock, then read back
-  signal w0, w1  : word;                       -- pass 2's W0, W1 (load clock)
-  signal mid_a   : word;
+  signal ram_q   : word := (others => '0');    -- the raw hash word for ram_w
+  signal w1      : word;                       -- pass 2's W1 (load clock)
   -- Load values, outside the round's process so that XST cannot share their
   -- adders with the round's (it did: a mux in the middle of a's carry chains)
   signal a_p2, e_p2, hkw_ld, dhkw_ld : word;
@@ -349,8 +346,6 @@ begin
   -- selects in front of adders, and as logic shared by all units it was one
   -- net with a fanout of 500.
   ld_p2 <= ld_p2_q;
-  mid_a <= mid3 when running = '1' and t = 61 else mid0;
-  w0    <= mid_a + a;                          -- W3 in round 61, W0 in the load clock (RAM only)
   w1    <= mid1 + b;
   mf1_e <= w1 when ld_p2 = '1' else mf1;
   -- One adder each: the midstate word is already in the per-job constant
@@ -359,21 +354,24 @@ begin
   hkw_ld  <= hk1m + b when ld_p2 = '1' else hk3 + mf1;
   dhkw_ld <= dhk1m + b when ld_p2 = '1' else dhk3 + mf1;
 
-  -- Pass 1's hash, written as it leaves the rounds. In the clock of round t,
-  -- a and e hold the state after round t - 1; after round 63 (the load clock)
-  -- a..h hold the whole hash. Addresses: W3 (mid3 + a after round 60) at 15,
-  -- written in the clock of round 61, then overwritten by W0 (mid0 + a after
-  -- round 63) in the load clock, which reads W3 out (READ_FIRST) for round 1;
-  -- W7..W4 (mid + e after rounds 60..63) at 7..4. Pass 2 reads W(t + 3) on port B
-  -- in the clock of round t (address idx + 1): 4..7 in rounds 1-4, and W0 at
-  -- 15 in round 12, for the delay line in round 13.
-  ram_wea   <= '1' when ld_p2 = '1' or (running = '1' and short_r = '0' and t = 61) else '0';
+  -- Pass 1's hash, raw, as it leaves the rounds. In the clock of round t, a
+  -- and e hold the state after round t - 1; after round 63 (the load clock)
+  -- a..h hold the whole hash. W7..W5 (e after rounds 60..62) are written at
+  -- 7..5 in rounds 61-63 and W4 (e after round 63) at 4 in the load clock,
+  -- on port B; W0 (a after round 63) at 15 in the load clock, on port A.
+  -- ram_q then holds the raw word of the W built in the next clock:
+  --   round 63:   b = W2 (a after round 61)  -> W2 in the load clock
+  --   load clock: d = W3 (a after round 60)  -> W3 in round 1
+  --   round 1:    W4, port B's write-through of the load clock -> round 2
+  --   rounds 1-3 read W5..W7 at idx + 2 = 5..7 -> rounds 3-5
+  --   round 11 reads W0 at idx + 2 = 15 -> round 13, the delay line
+  ram_wea   <= ld_p2;
   ram_web   <= '1' when ld_p2 = '1' or (running = '1' and short_r = '0' and t >= 61) else '0';
   ram_addrb <= to_unsigned(4, 4) when ld_p2 = '1' else
                to_unsigned(4, 4) - t(3 downto 0) when short_r = '0' else
-               idx + 1;
+               idx + 2;
   ram : RAMB16_S36_S36
-    generic map (WRITE_MODE_A => "READ_FIRST", WRITE_MODE_B => "WRITE_FIRST")
+    generic map (WRITE_MODE_A => "WRITE_FIRST", WRITE_MODE_B => "WRITE_FIRST")
     port map (
       DOA => ram_doa, DOB => ram_dob, DOPA => open, DOPB => open,
       ADDRA => "000001111",
@@ -384,12 +382,21 @@ begin
       ENA => '1', ENB => '1', SSRA => '0', SSRB => '0',
       WEA => ram_wea, WEB => ram_web);
   ram_addrb_v <= "00000" & std_logic_vector(ram_addrb);
-  ram_dia     <= std_logic_vector(w0);
-  ram_dib     <= std_logic_vector(mid_e + e);
+  ram_dia     <= std_logic_vector(a);
+  ram_dib     <= std_logic_vector(e);
 
-  -- W2 in the load clock (from c), W3 in round 1 (port A), then port B
-  ram_w  <= mid2 + c when ld_p2 = '1' else
-            unsigned(ram_doa) when idx = 3 else
-            unsigned(ram_dob);
-  ovw0_e <= unsigned(ram_dob) when short_r = '1' else ovw0;
+  process (clk)
+  begin
+    if rising_edge(clk) then
+      if ld_p2 = '1' then
+        ram_q <= d;
+      elsif running = '1' and short_r = '0' and t = 63 then
+        ram_q <= b;
+      else
+        ram_q <= unsigned(ram_dob);
+      end if;
+    end if;
+  end process;
+  ram_w  <= mid_w + ram_q;
+  ovw0_e <= ram_w when short_r = '1' else ovw0;
 end architecture;

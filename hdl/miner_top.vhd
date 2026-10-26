@@ -9,8 +9,12 @@
 --                    a multiple of 4 with 4 units), hit mask (4, ANDed with
 --                    H7 of the final hash), state3 (32: second block a..h
 --                    after rounds 0-2, sw/sha256_mid.state3).
---                  With the UART link the job is 76 bytes, without the first
---                    nonce word (always 0) and the mask (fixed at 20 bits).
+--                  With the UART link the job is 100 bytes, without the first
+--                    nonce word (always 0) and the mask (fixed at 20 bits),
+--                    and with the per-job sums the host computes (24, after
+--                    state3): h + K3 and d + h + K3 of state3, then pass 2's
+--                    round-0 sums with midstate words 0 and 1: A1 + mid0,
+--                    E1 + mid0, h + K1 + mid1, d + h + K1 + mid1 of the IV.
 --                  One address instead of 84 saves a byte decoder per byte.
 --   0x38       W   bit0 = restart and run, bit1 = stop
 --   0x39       R   bit0 = running, bit1 = hit pending
@@ -23,7 +27,7 @@
 --   0x48       R   hits since restart (wraps; USB link only)
 --   0x4D       R   nonce stride: NCORES rounded up to a power of two (unit i
 --                  hashes i, i + stride, ...; 0 on older bitstreams)
---   0x4E       R   magic: 0xB7 (84-byte job), 0xB8 (76-byte job, UART link)
+--   0x4E       R   magic: 0xB7 (84-byte job), 0xB9 (100-byte job, UART link)
 --   0x4F       R   NCORES
 -- The job is write-only; 0x3B reads back. The UART protocol is in
 -- uart_bridge.vhd.
@@ -80,7 +84,7 @@ architecture rtl of miner_top is
   function job_bytes_f return positive is
   begin
     if HOST_UART then
-      return 76;
+      return 100;
     end if;
     return 84;
   end;
@@ -121,7 +125,7 @@ architecture rtl of miner_top is
   type kidx_array is array (0 to NCORES - 1) of unsigned(5 downto 0);
   signal kidxs       : kidx_array;
   signal k_shared    : unsigned(31 downto 0) := (others => '0');
-  signal mid_e       : unsigned(31 downto 0) := (others => '0');
+  signal mid_w       : unsigned(31 downto 0) := (others => '0');
   -- Round 0 of pass 2 on the IV, with the midstate words it adds folded in
   -- once per job (see sha256_core)
   function iv_w(i : natural) return unsigned is
@@ -183,7 +187,13 @@ begin
     first <= unsigned(job(319 downto 288));
     mask  <= unsigned(job(287 downto 256));
   end generate;
-  state3   <= unsigned(job(255 downto 0));
+  -- state3, then (UART job only) the per-job sums below it
+  g_s3_uart : if HOST_UART generate
+    state3 <= unsigned(job(447 downto 192));
+  end generate;
+  g_s3_depp : if not HOST_UART generate
+    state3 <= unsigned(job(255 downto 0));
+  end generate;
 
   ---------------------------------------------------------------------------
   -- Hashing units: unit i hashes first + i, first + i + STEP, ...
@@ -203,13 +213,13 @@ begin
     -- (they are in lockstep anyway): ~50 slices per follower.
     u : entity work.miner_unit
       generic map (STEP => STEP, STEP_BITS => STEP_BITS, MASTER => i = 0, UNIT => i, CSA => CSA,
-                   HYBRID => HYBRID)
+                   HYBRID => HYBRID, HIT20 => HOST_UART)
       port map (
         clk       => clk,
         restart   => restart,
         enable    => enable,
         midstate  => midstate,
-        mid_e     => mid_e,
+        mid_w     => mid_w,
         a1m       => a1m,
         e1m       => e1m,
         hk1m      => hk1m,
@@ -236,24 +246,46 @@ begin
   begin
     if rising_edge(clk) then
       k_q      <= KROM(to_integer(kidxs(0)));
-      hk3      <= state3(31 downto 0) + K(3);
-      a1m      <= A1_IV + midstate(255 downto 224);
-      e1m      <= E1_IV + midstate(255 downto 224);
-      hk1m     <= HK1_IV + midstate(223 downto 192);
-      dhk1m    <= DHK1_IV + midstate(223 downto 192);
-      -- The midstate word the cores add to the e value they store in the
-      -- next clock (see sha256_core): words 7, 6, 5, 4 in pass 1's rounds 61,
-      -- 62, 63 and the load clock after them, so after rounds 60..63 here.
-      -- Only the round counter's low bits, a register, pick it.
-      case to_integer(ctls(0).core.t(1 downto 0)) is
-        when 0      => mid_e <= midstate(31 downto 0);      -- word 7
-        when 1      => mid_e <= midstate(63 downto 32);     -- word 6
-        when 2      => mid_e <= midstate(95 downto 64);     -- word 5
-        when others => mid_e <= midstate(127 downto 96);    -- word 4
+      -- The midstate word the cores add to the hash word they read back in
+      -- the next clock (see sha256_core): word 2 in the load clock (round
+      -- counter 0 after it wrapped past 63), 3..7 in rounds 1-5, 0 in round
+      -- 13. Only the round counter, a register, picks it.
+      case to_integer(ctls(0).core.t + 3) mod 16 is
+        when 1      => mid_w <= midstate(223 downto 192);
+        when 2      => mid_w <= midstate(191 downto 160);
+        when 3      => mid_w <= midstate(159 downto 128);
+        when 4      => mid_w <= midstate(127 downto 96);
+        when 5      => mid_w <= midstate(95 downto 64);
+        when 6      => mid_w <= midstate(63 downto 32);
+        when 7      => mid_w <= midstate(31 downto 0);
+        when others => mid_w <= midstate(255 downto 224);
       end case;
-      dhk3     <= state3(159 downto 128) + state3(31 downto 0) + K(3);
     end if;
   end process;
+
+  -- The per-job sums: from the job with the UART link (the ESP32 computes
+  -- them, six adders less here), computed here for the USB host.
+  g_sums_job : if HOST_UART generate
+    hk3   <= unsigned(job(191 downto 160));
+    dhk3  <= unsigned(job(159 downto 128));
+    a1m   <= unsigned(job(127 downto 96));
+    e1m   <= unsigned(job(95 downto 64));
+    hk1m  <= unsigned(job(63 downto 32));
+    dhk1m <= unsigned(job(31 downto 0));
+  end generate;
+  g_sums_here : if not HOST_UART generate
+    process (clk)
+    begin
+      if rising_edge(clk) then
+        hk3   <= state3(31 downto 0) + K(3);
+        dhk3  <= state3(159 downto 128) + state3(31 downto 0) + K(3);
+        a1m   <= A1_IV + midstate(255 downto 224);
+        e1m   <= E1_IV + midstate(255 downto 224);
+        hk1m  <= HK1_IV + midstate(223 downto 192);
+        dhk1m <= DHK1_IV + midstate(223 downto 192);
+      end if;
+    end process;
+  end generate;
 
   -- The display costs ~150 slices, which the units can use instead when the
   -- host (AxeOS on the ESP32) shows the rate anyway.
@@ -341,7 +373,7 @@ begin
       when 16#4D# => rd := std_logic_vector(to_unsigned(STEP, 8));
       when 16#4E# =>
         if HOST_UART then
-          rd := x"B8";
+          rd := x"B9";
         else
           rd := x"B7";
         end if;

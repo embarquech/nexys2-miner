@@ -1,24 +1,38 @@
 -- miner_top with HOST_UART, driven through its UART pins like the ESP32 does:
 -- magic, a job, hit, nonce read-back, dark-mode register. The UART build
 -- always starts at nonce 0 and its hit mask is fixed at 20 bits, so the job
--- is the genesis header and the first hit is nonce word 0x3417D (213 373,
--- found with hashlib). A fast baud
+-- is the genesis header with its time 1280 s later, picked (with hashlib) for
+-- a first hit at nonce word 17: a few hundred clocks, not millions. A fast baud
 -- rate (10 clocks per bit) keeps the simulation short.
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity tb_uart is
+  generic (NCORES : positive := 4;            -- 5: the shipped build, stride 8
+           CSA    : boolean := true);
 end entity;
 
 architecture sim of tb_uart is
   constant MIDSTATE : std_logic_vector(255 downto 0) :=
     x"bc909a336358bff090ccac7d1e59caa8c3c8d8e94f0103c896b187364719f91b";
-  constant TAIL     : std_logic_vector(95 downto 0) := x"4b1e5e4a29ab5f49ffff001d";
+  constant TAIL     : std_logic_vector(95 downto 0) := x"4b1e5e4a29b05f49ffff001d";
   -- state after rounds 0-2 of the second block (sw/sha256_mid.state3)
   constant STATE3   : std_logic_vector(255 downto 0) :=
-    x"de8459101f8aee5cb7f888dfbc909a33238956e3af5e1cbaa8a8881cc3c8d8e9";
-  constant WINNER   : unsigned(31 downto 0) := x"0003417d";
+    x"c42307481f8fee5cb7f888dfbc909a331d28c543af631cbaa8a8881cc3c8d8e9";
+  -- per-job sums the ESP32 sends: h+K3, d+h+K3 of STATE3; A1, E1, h+K1,
+  -- d+h+K1 of round 0 on the IV plus midstate words 0, 0, 1, 1
+  constant SUMS     : std_logic_vector(191 downto 0) :=
+    x"ad7eb48e6a0f4ec1b899228055587cd5f413de2c3082d19e";
+  constant WINNER   : unsigned(31 downto 0) := x"00000011";
+  -- nonce stride, NCORES rounded up to a power of two (17 is unit 1's either way)
+  function stride return natural is
+  begin
+    if NCORES <= 4 then
+      return 4;
+    end if;
+    return 8;
+  end;
   constant BIT_T    : time := 200 ns;               -- 5 Mbaud at a 50 MHz clock
 
   signal clk      : std_logic := '0';
@@ -31,7 +45,7 @@ begin
   clk <= not clk after 10 ns when not stop_clk;
 
   dut : entity work.miner_top
-    generic map (NCORES => 4, CLK_MUL => 1, CLK_DIV => 1,
+    generic map (NCORES => NCORES, CSA => CSA, CLK_MUL => 1, CLK_DIV => 1,
                  HOST_UART => true, UART_BAUD => 5_000_000)
     port map (clk50 => clk, EppAstb => '1', EppDstb => '1', EppWr => '1',
               EppWait => open, EppDB => open, UartRx => to_fpga, UartTx => from_fpga,
@@ -95,10 +109,10 @@ begin
     wait for 1 us;
     send(x"FF");                                     -- noise is ignored
     read_regs(16#4E#, 2, v16);
-    assert v16 = x"B804" report "bad magic/ncores" severity failure;
-    report "magic ok, 4 units";
+    assert v16 = x"B9" & to_unsigned(NCORES, 8) report "bad magic/ncores" severity failure;
+    report "magic ok, " & integer'image(NCORES) & " units";
 
-    write_cmd(x"4A", 16#00#, MIDSTATE & TAIL & STATE3);   -- 76-byte job
+    write_cmd(x"4A", 16#00#, MIDSTATE & TAIL & STATE3 & SUMS);   -- 100-byte job
     write_regs(16#38#, x"01");
     loop
       read_regs(16#39#, 1, v8);
@@ -107,7 +121,7 @@ begin
       assert tries < 100000 report "no hit" severity failure;
     end loop;
     read_regs(16#40#, 4, v32);
-    assert v32 = WINNER + 4 report "WRONG nonce" severity failure;
+    assert v32 = WINNER + stride report "WRONG nonce" severity failure;
     report "hit nonce read back over UART";
 
     assert led(0) = '1' report "LD0 should be on" severity failure;

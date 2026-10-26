@@ -22,8 +22,11 @@ hashrate changes apply to stock ESP-Miner; the `/api/system/cores` hunk in
 - **`components/asic/nexys2.c`**: the driver. It talks to the FPGA over UART1
   (GPIO17/18, 921600 baud) with the protocol in `hdl/uart_bridge.vhd`:
   - on each job, builds the 80-byte header, computes the midstate and the state
-    after rounds 0-2, and sends the job with one `J` command: 76 bytes, or 84
-    (with first nonce and hit mask) for bitstreams that report magic 0xB7;
+    after rounds 0-2, and sends the job with one `J` command: 100 bytes with
+    the per-job sums (magic 0xB9), or the older 76-byte (0xB8) and 84-byte
+    (0xB7, with first nonce and hit mask) jobs;
+  - scans for the baud rate if 921600 gets no answer: a bitstream re-clocked
+    with `ise/refreq.sh` keeps the UART divider of the clock it was built for;
   - polls for hits every 20 ms, re-hashes each one, counts wrong hashes (logged
     every 1000 hits) and passes hashes with 24+ leading zero bits to ESP-Miner
     (one every ~5 s: it fills the Shares page);
@@ -64,5 +67,5 @@ Without Wi-Fi in NVS it opens its `Bitaxe_XXXX` access point like any Bitaxe.
 
 Notes: keep `selftest` unset (it would fail on the missing sensors); the
 `frequency` setting is informative only, the FPGA clock is fixed by the
-bitstream (100 MHz for the shipped one, the default). The expected hash rate
+bitstream (112 for the shipped one, 112.5 MHz, the default). The expected hash rate
 is frequency x units / 122.

@@ -11,9 +11,9 @@ times slower than a single Bitaxe Gamma, so this is a project about pushing a
 
 | | |
 |---|---|
-| Hash rate | **4.10 MH/s** (5 units x 100 MHz / 122 clocks per nonce) |
-| Error rate | ~0.5 % wrong hashes, re-hashed and dropped by the ESP32 |
-| Device use | 94 % of slices, 82 % of LUTs, 6 of 20 block RAMs |
+| Hash rate | **4.61 MH/s** (5 units x 112.5 MHz / 122 clocks per nonce) |
+| Error rate | 0 wrong hashes over the bench runs (every hit is re-hashed by the ESP32) |
+| Device use | 89 % of slices, 77 % of LUTs, 6 of 20 block RAMs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
 
 ## How it works
@@ -26,7 +26,9 @@ pool <-stratum-> ESP32-S3 (ESP-Miner + nexys2 driver) <-UART 921600-> FPGA
 
 The ESP32 builds each block header, computes the **midstate** (SHA-256 of the
 first 64 bytes, the same for every nonce) and the state after **rounds 0-2** of
-the second block (they only see header bytes 64..75), and sends a 76-byte job.
+the second block (they only see header bytes 64..75), and sends a 100-byte
+job: those two states, header bytes 64..75, and six per-job sums the FPGA
+would otherwise need adders for (the first round of each pass).
 The FPGA only does the nonce-dependent work and reports back nonces whose hash
 has 20 leading zero bits. The ESP32 re-hashes each one, keeps a running count of
 wrong hashes, and passes the ones with 24 or more zero bits to ESP-Miner, which
@@ -43,10 +45,12 @@ per clock, **122 clocks per nonce**:
   clock, and it **stops after round 60**: only H7 is needed for the target
   test, and e after round 60 is what h would be after round 63 (61 clocks);
 - **pass 1's hash is never captured**: its words are the last four values of
-  `a` and `e`, written into a block RAM two per clock (one per port) as they
-  leave the last rounds, midstate added on the way in; pass 2 reads them back
-  as message words. This replaced a 256-bit register, six adders and a word
+  `a` and `e`, written raw into a block RAM as they leave the last rounds;
+  pass 2 reads them back into a register and adds the midstate word there,
+  one adder per unit. This replaced a 256-bit register, six adders and a word
   mux per unit, and is what made room for a fifth unit;
+- the hit test (20 zero bits of H7 = IV7 + h7) is two constant compares on
+  h7 instead of a 24-bit adder;
 - the round has two carry chains for `a` (T1, then T1 + T2), ~250 LUTs per
   unit smaller than the carry-save round (`csa`, one chain each for `a` and
   `e`, which the 4-unit builds used); `h+K+W` is computed one round ahead, and
@@ -66,11 +70,19 @@ per clock, **122 clocks per nonce**:
 
 ### Clock
 
-The core clock comes from a DCM: 50 MHz x 2 = **100 MHz**. The timing tools
-only guarantee 67.4 MHz worst case (slowest silicon, 85 degC); the real chip at
-room temperature runs 100 MHz with ~0.5 % wrong hashes, 103.3 MHz with ~8 %.
-The 4-unit carry-save build (77.6 MHz worst case) ran 106.25 MHz without errors,
-3.48 MH/s. Two tricks get there:
+The core clock comes from a DCM: 50 MHz x 9 / 4 = **112.5 MHz**. The timing
+tools only guarantee 78.6 MHz worst case (slowest silicon, 85 degC); the real
+chip at room temperature runs it without errors:
+
+| Clock | Wrong hashes (2 min) | Useful rate |
+|---|---|---|
+| 103.3 - 112.5 MHz | 0 | 4.24 - 4.61 MH/s |
+| 115 MHz | ~1 % | ~4.67 MH/s |
+| 116.7 MHz | ~20 % | ~3.8 MH/s |
+
+The shipped clock leaves a step of margin below the edge. Fewer LUTs mattered
+more than any logic trick: the same design at 94 % of slices placed for
+67 MHz worst case, at 89 % for 78.6. Two tricks get there:
 
 - `ise/build.sh` can tell PAR the input clock is slower than it is (the
   `ts_ns` argument). Asked for the true target, PAR gives up and places far
@@ -79,7 +91,7 @@ The 4-unit carry-save build (77.6 MHz worst case) ran 106.25 MHz without errors,
 - the design is built at 31/15 (103.3 MHz), then
   `ise/refreq.sh` changes only the DCM multiplier/divider of the placed and
   routed design (through XDL): the same placement measured at several
-  frequencies, and the shipped one re-clocked to 2/1 (`prom` also writes the
+  frequencies, and the shipped one re-clocked to 9/4 (`prom` also writes the
   PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
   the same ratio; the ESP32 driver scans for the baud rate if 921600 gets no
   answer, so any re-clocked bitstream works.
@@ -134,7 +146,7 @@ Inside the VM:
 ```bash
 # part, units, Area, DCM mul/div, tag, PAR input period (ns), seed, host link, display, round
 bash ise/build.sh xc3s500e-fg320-4 5 Area 31 15 mybuild 22.94 3 uart nodisplay plain
-bash ise/refreq.sh 2 1 mybuild100 /tmp/nexys2-build/miner_top.ncd prom   # re-clock to 100 MHz
+bash ise/refreq.sh 9 4 mybuild112 /tmp/nexys2-build/miner_top.ncd prom  # re-clock to 112.5 MHz
 # -> ise/out/mybuild.bit (JTAG) and ise/out/mybuild.svf (PROM)
 ```
 
@@ -191,6 +203,6 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-3.39 -> 3.48 -> **4.10 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
+3.39 -> 3.48 -> 4.10 -> **4.61 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
 carry-save arithmetic, shared constants and control, pass 1's hash in block
 RAM for a fifth unit, and a lot of placement experiments.

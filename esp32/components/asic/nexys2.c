@@ -20,7 +20,7 @@
 #include <string.h>
 
 static const char *TAG = "nexys2";
-static bool short_job;            // the bitstream takes the 76-byte job
+static uint8_t job_magic;         // which job the bitstream takes, see MAGIC*
 
 // FPGA register map (nexys2-miner/hdl/miner_top.vhd)
 #define REG_JOB      0x00     // job port: midstate, tail, [first, mask,] state3
@@ -34,6 +34,8 @@ static bool short_job;            // the bitstream takes the 76-byte job
 #define REG_MAGIC    0x4E
 #define MAGIC        0xB7     // 84-byte job (first nonce word and hit mask)
 #define MAGIC_SHORT  0xB8     // 76-byte job: nonce 0 and 20-bit mask built in
+#define MAGIC_SUMS   0xB9     // 100-byte job: as 0xB8, plus the per-job sums
+#define MAGIC_OK(m)  ((m) == MAGIC || (m) == MAGIC_SHORT || (m) == MAGIC_SUMS)
 
 #define CMD_WRITE 0x57
 #define CMD_JOB   0x4A           // write n bytes to one address
@@ -192,7 +194,7 @@ static bool probe_pins(uint8_t id[2])
     SERIAL_send(idle, sizeof(idle), false);
     vTaskDelay(pdMS_TO_TICKS(10));
     SERIAL_clear_buffer();
-    if (fpga_read(REG_MAGIC, id, 2) && (id[0] == MAGIC || id[0] == MAGIC_SHORT)) {
+    if (fpga_read(REG_MAGIC, id, 2) && MAGIC_OK(id[0])) {
         return true;
     }
     // TX and RX crossed the wrong way round is the usual wiring slip; the
@@ -204,7 +206,7 @@ static bool probe_pins(uint8_t id[2])
     uart_set_pin(UART_NUM_1, 18, 17, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     vTaskDelay(pdMS_TO_TICKS(10));
     SERIAL_clear_buffer();
-    if (fpga_read(REG_MAGIC, id, 2) && (id[0] == MAGIC || id[0] == MAGIC_SHORT)) {
+    if (fpga_read(REG_MAGIC, id, 2) && MAGIC_OK(id[0])) {
         ESP_LOGW(TAG, "found with GPIO18 TX / GPIO17 RX: the wires are crossed, it works anyway");
         return true;
     }
@@ -226,7 +228,7 @@ static bool find_fpga(uint8_t id[2])
         return true;
     }
     ESP_LOGW(TAG, "no answer at %d baud, scanning for a re-clocked bitstream", baud);
-    for (int mhz = 110; mhz >= 50; mhz--) {
+    for (int mhz = 130; mhz >= 50; mhz--) {
         int b = (int)((int64_t)NEXYS2_BAUD * mhz * 3 / 310);   // built for 310/3 MHz
         if (mhz == 103) {
             continue;
@@ -271,7 +273,7 @@ uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE)
     // FPGA was found; GH/s
     GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate =
         GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value * ncores / NEXYS2_CYCLES_PER_NONCE / 1000.0;
-    short_job = id[0] == MAGIC_SHORT;
+    job_magic = id[0];
     ESP_LOGI(TAG, "Nexys2 FPGA miner found, %u hashing units, nonce stride %u", ncores, stride);
 
     NEXYS2_set_lights(!nvs_config_get_bool(NVS_CONFIG_FPGA_LIGHTS_OFF));
@@ -309,15 +311,15 @@ void NEXYS2_send_work(GlobalState * GLOBAL_STATE, bm_job * next_bm_job)
     sha256_midstate(header, mid);
 
     // job port: midstate, header bytes 64..75, first nonce word and hit mask
-    // (long job only), state3
-    uint8_t regs[84];
+    // (long job only), state3, the per-job sums (0xB9 job only)
+    uint8_t regs[100];
     size_t len = 0;
     for (int i = 0; i < 8; i++) {
         put_be32(regs + 4 * i, mid[i]);
     }
     memcpy(regs + 32, header + 64, 12);
     len = 44;
-    if (!short_job) {
+    if (job_magic == MAGIC) {
         put_be32(regs + 44, 0);
         // The hash is read little-endian, so its top 32 bits are H7 byte-swapped.
         uint32_t top = (uint32_t)(((1ULL << FPGA_HIT_BITS) - 1) << (32 - FPGA_HIT_BITS));
@@ -331,6 +333,25 @@ void NEXYS2_send_work(GlobalState * GLOBAL_STATE, bm_job * next_bm_job)
         put_be32(regs + len + 4 * i, st3[i]);
     }
     len += 32;
+    if (job_magic == MAGIC_SUMS) {
+        // What the FPGA would otherwise add up once per job: h + K3 and
+        // d + h + K3 of state3 (pass 1's first round), and round 0 of pass 2
+        // on the IV with midstate words 0 and 1 folded in.
+        static const uint32_t IV0 = 0x6a09e667, IV1 = 0xbb67ae85, IV2 = 0x3c6ef372, IV3 = 0xa54ff53a;
+        static const uint32_t IV4 = 0x510e527f, IV5 = 0x9b05688c, IV6 = 0x1f83d9ab, IV7 = 0x5be0cd19;
+        uint32_t t1 = IV7 + (ROTR(IV4, 6) ^ ROTR(IV4, 11) ^ ROTR(IV4, 25)) + ((IV4 & IV5) ^ (~IV4 & IV6)) + K[0];
+        uint32_t a1 = t1 + (ROTR(IV0, 2) ^ ROTR(IV0, 13) ^ ROTR(IV0, 22)) + ((IV0 & IV1) ^ (IV0 & IV2) ^ (IV1 & IV2));
+        uint32_t e1 = IV3 + t1;
+        uint32_t hk1 = IV6 + K[1];
+        uint32_t sums[6] = {
+            st3[7] + K[3], st3[3] + st3[7] + K[3],
+            a1 + mid[0], e1 + mid[0], hk1 + mid[1], IV2 + hk1 + mid[1],
+        };
+        for (int i = 0; i < 6; i++) {
+            put_be32(regs + len + 4 * i, sums[i]);
+        }
+        len += 24;
+    }
 
     uint8_t id = (job_id + 4) % 128;      // multiples of 4, as SYSTEM_clean_jobs_queue expects
 

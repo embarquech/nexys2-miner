@@ -11,7 +11,7 @@
 -- i.e. it holds header bytes 76..79 read big-endian; the host byte-swaps it.
 --
 -- The core keeps the first hash itself (in a block RAM, see sha256_core) and
--- returns only h7 of the second; mid_e is a midstate word the cores add to
+-- returns only h7 of the second; mid_w is a midstate word the cores add to
 -- the hash words they store, from a register shared by all units.
 library ieee;
 use ieee.std_logic_1164.all;
@@ -25,13 +25,14 @@ entity miner_unit is
     MASTER    : boolean := true;              -- false: follow ctl_in
     CSA       : boolean := true;              -- see sha256_core
     HYBRID    : boolean := false;
-    UNIT      : natural := 0);                -- low nonce bits of a follower
+    UNIT      : natural := 0;                 -- low nonce bits of a follower
+    HIT20     : boolean := false);            -- mask is x"00F0FFFF": test without an adder
   port (
     clk       : in  std_logic;
     restart   : in  std_logic;                -- pulse: abort, reload nonce from first
     enable    : in  std_logic;
     midstate  : in  unsigned(255 downto 0);
-    mid_e     : in  unsigned(31 downto 0);
+    mid_w     : in  unsigned(31 downto 0);
     a1m       : in  unsigned(31 downto 0);    -- see sha256_core
     e1m       : in  unsigned(31 downto 0);
     hk1m      : in  unsigned(31 downto 0);
@@ -80,6 +81,21 @@ architecture rtl of miner_unit is
   begin
     return v(255 - 32 * i downto 224 - 32 * i);
   end;
+
+  -- H7 = IV H7 + h7. With the UART's fixed mask (bits 0-15 and 20-23 of H7
+  -- zero) that is: h7's low half equal to -IV7, which carries 1 out of it
+  -- unless that is 0; then h7's bits 16-23 in the 16 values that bring bits
+  -- 20-23 of the sum to zero. Constant compares instead of a 24-bit adder.
+  -- (integer arithmetic: XST 14.7 got the unsigned version wrong and made
+  -- every hit test constant false)
+  constant IV7   : word := hw(IV, 7);
+  constant IV_LO : natural := to_integer(IV7(15 downto 0));
+  constant IV_B2 : natural := to_integer(IV7(23 downto 16));
+  constant C16   : natural := boolean'pos(IV_LO /= 0);
+  constant LO16  : unsigned(15 downto 0) := to_unsigned((65536 - IV_LO) mod 65536, 16);
+  constant B2LO  : unsigned(7 downto 0) := to_unsigned((512 - IV_B2 - C16) mod 256, 8);
+  constant B2HI  : unsigned(7 downto 0) := to_unsigned((512 - IV_B2 - C16 + 15) mod 256, 8);
+  signal hit_now : std_logic;                      -- core_h7 is a hit
 begin
   sha : entity work.sha256_core
     generic map (MASTER => MASTER, CSA => CSA, HYBRID => HYBRID)
@@ -91,11 +107,8 @@ begin
       state_in => state3,
       hk3      => hk3,
       dhk3     => dhk3,
-      mid0     => midstate(255 downto 224),
       mid1     => midstate(223 downto 192),
-      mid2     => midstate(191 downto 160),
-      mid3     => midstate(159 downto 128),
-      mid_e    => mid_e,
+      mid_w    => mid_w,
       a1m      => a1m,
       e1m      => e1m,
       hk1m     => hk1m,
@@ -179,7 +192,7 @@ begin
             if core_done = '1' then
               -- H7 = IV H7 + h; e after round 60 is what h would be after
               -- round 63
-              if ((hw(IV, 7) + core_h7) and mask) = 0 then
+              if hit_now = '1' then
                 hit_r <= '1';
               end if;
               n_q     <= n + STEP;
@@ -195,6 +208,16 @@ begin
       end if;
     end if;
   end process;
+
+  -- (as a function XST evaluated this to a constant false)
+  g_hit20 : if HIT20 generate
+    assert B2LO <= B2HI report "hit range wraps: not handled" severity failure;
+    hit_now <= '1' when core_h7(15 downto 0) = LO16 and core_h7(23 downto 16) >= B2LO
+                        and core_h7(23 downto 16) <= B2HI else '0';
+  end generate;
+  g_hit_mask : if not HIT20 generate
+    hit_now <= '1' when ((IV7 + core_h7) and mask) = 0 else '0';
+  end generate;
 
   hit       <= hit_r;
   ctl_out <= (st => st_q, pass2 => pass2_q, n => n_q, n_next => n_next_q,
