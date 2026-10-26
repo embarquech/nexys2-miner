@@ -674,7 +674,7 @@ index 00000000..1c0640d5
 +fbstratumpass,data,string,d=10
 +fbstratumdiff,data,u16,10
 +fbstratumxnsum,data,u16,0
-+asicfrequency,data,u16,107
++asicfrequency,data,u16,108
 +asicvoltage,data,u16,1200
 +autofanspeed,data,u16,0
 +fanspeed,data,u16,0
@@ -686,7 +686,7 @@ index 00000000..1c0640d5
 +display,data,string,NONE
 +fpgalightsoff,data,u16,0
 diff --git a/main/device_config.h b/main/device_config.h
-index 5c250c32..f5125127 100644
+index 5c250c32..38c0ebe9 100644
 --- a/main/device_config.h
 +++ b/main/device_config.h
 @@ -26,6 +26,7 @@ typedef enum
@@ -711,10 +711,10 @@ index 5c250c32..f5125127 100644
  static const AsicConfig ASIC_BM1373 = { .id = BM1373, .name = "BM1372/BM1373", .chip_id = 1372, .default_frequency_mhz = 327, .frequency_options = BM1373_FREQUENCY_OPTIONS, .default_voltage_mv = 1000, .voltage_options = BM1373_VOLTAGE_OPTIONS, .difficulty = 256, .core_count = 128, .small_core_count = 6725, .hash_domains = 4, .init_retry_attempts = 3, .domain_hashrate_scale = 2.0f, .hashrate_test_percentage_target = 0.85, .default_asic_timeout = 500};
 +// The FPGA clock is set by the bitstream (50 MHz * 31 / 15); listed for the UI only.
 +// The FPGA's clock is set by its bitstream, not from here: this only tells
-+// AxeOS what to expect (the shipped 6-unit bitstream runs 106.67 MHz).
-+static const uint16_t NEXYS2_FREQUENCY_OPTIONS[] = {100, 103, 106, 107, 110, 112, 114, 115, 0};
++// AxeOS what to expect (the shipped 6-unit bitstream runs 108.33 MHz).
++static const uint16_t NEXYS2_FREQUENCY_OPTIONS[] = {100, 103, 106, 107, 108, 110, 112, 114, 115, 0};
 +static const uint16_t NEXYS2_VOLTAGE_OPTIONS[]   = {1200, 0};
-+static const AsicConfig ASIC_NEXYS2 = { .id = NEXYS2, .name = "Nexys2 FPGA", .chip_id = 0, .default_frequency_mhz = 107, .frequency_options = NEXYS2_FREQUENCY_OPTIONS, .default_voltage_mv = 1200, .voltage_options = NEXYS2_VOLTAGE_OPTIONS, .difficulty = 1, .core_count = 4, .small_core_count = 4, .hash_domains = 1, .hashrate_test_percentage_target = 0.85, .default_asic_timeout = 10000};
++static const AsicConfig ASIC_NEXYS2 = { .id = NEXYS2, .name = "Nexys2 FPGA", .chip_id = 0, .default_frequency_mhz = 108, .frequency_options = NEXYS2_FREQUENCY_OPTIONS, .default_voltage_mv = 1200, .voltage_options = NEXYS2_VOLTAGE_OPTIONS, .difficulty = 1, .core_count = 4, .small_core_count = 4, .hash_domains = 1, .hashrate_test_percentage_target = 0.85, .default_asic_timeout = 10000};
  
  static const AsicConfig default_asic_configs[] = {
 +    ASIC_NEXYS2,
