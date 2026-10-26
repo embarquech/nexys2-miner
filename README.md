@@ -11,16 +11,16 @@ times slower than a single Bitaxe Gamma, so this is a project about pushing a
 
 | | |
 |---|---|
-| Hash rate | **4.68 MH/s** (5 units x 114.3 MHz / 122 clocks per nonce) |
+| Hash rate | **4.92 MH/s** (6 units x 100 MHz / 122 clocks per nonce) |
 | Error rate | 0 wrong hashes over the bench runs (every hit is re-hashed by the ESP32) |
-| Device use | 89 % of slices, 77 % of LUTs, 6 of 20 block RAMs |
+| Device use | 99 % of slices, 91 % of LUTs, 7 of 20 block RAMs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
 
 ## How it works
 
 ```
 pool <-stratum-> ESP32-S3 (ESP-Miner + nexys2 driver) <-UART 921600-> FPGA
-                  midstate, rounds 0-2 precomputed          5 hashing units
+                  midstate, rounds 0-2 precomputed          6 hashing units
                   re-hashes every hit                         sha256_core
 ```
 
@@ -36,7 +36,7 @@ submits those that meet the pool difficulty.
 
 ### The hashing unit (`hdl/miner_unit.vhd`, `hdl/sha256_core.vhd`)
 
-Each of the 5 units runs both SHA-256 passes on one iterative core, one round
+Each of the 6 units runs both SHA-256 passes on one iterative core, one round
 per clock, **122 clocks per nonce**:
 
 - **pass 1** starts at round 3 from the precomputed state (61 rounds); its load
@@ -65,25 +65,28 @@ per clock, **122 clocks per nonce**:
   of adders are per-unit registers instead: as shared logic they became nets
   with a fanout of 500;
 - the units split the nonce space with a stride of 8: unit *i* hashes *i*,
-  *i*+8, ... (3 nonces in 8 are skipped; a job is replaced long before its
+  *i*+8, ... (2 nonces in 8 are skipped; a job is replaced long before its
   2^32 nonces run out).
 
 ### Clock
 
-The core clock comes from a DCM: 50 MHz x 16 / 7 = **114.3 MHz**. The timing
-tools only guarantee 78.6 MHz worst case (slowest silicon, 85 degC); the real
-chip at room temperature runs it without errors:
+The core clock comes from a DCM: 50 MHz x 2 = **100 MHz**. The timing tools
+only guarantee 69.8 MHz worst case (slowest silicon, 85 degC); the real chip
+at room temperature runs it without errors. Six units fill the chip (99 % of
+slices), so they run slower than five, but the sixth more than pays for it:
 
-| Clock | Wrong hashes (2 min) | Useful rate |
-|---|---|---|
-| 103.3 - 114.3 MHz | 0 | 4.24 - 4.68 MH/s |
-| 115 MHz | ~1 % | ~4.67 MH/s |
-| 116.7 MHz | ~20 % | ~3.8 MH/s |
+| Build | Clock | Wrong hashes (2 min) | Useful rate |
+|---|---|---|---|
+| 6 units | **100 MHz** | **0** | **4.92 MH/s** |
+| 6 units | 103.3 MHz | ~7 % | ~4.74 MH/s |
+| 5 units (89 % of slices, 78.6 MHz worst case) | 114.3 MHz | 0 | 4.68 MH/s |
+| 5 units | 115 MHz | ~1 % | ~4.67 MH/s |
+| 5 units | 116.7 MHz | ~20 % | ~3.8 MH/s |
 
-The shipped clock is the last DCM step below the edge; 113.6 MHz (25/11)
-keeps a little more margin for a warm, closed case. Fewer LUTs mattered
-more than any logic trick: the same design at 94 % of slices placed for
-67 MHz worst case, at 89 % for 78.6. Two tricks get there:
+The worst case the tools report says little about the real limit: another
+5-unit placement reported 80.3 MHz and failed 30 % of hashes at 115 MHz.
+Only the board decides, so each candidate is re-clocked and benched.
+Two tricks get there:
 
 - `ise/build.sh` can tell PAR the input clock is slower than it is (the
   `ts_ns` argument). Asked for the true target, PAR gives up and places far
@@ -92,7 +95,7 @@ more than any logic trick: the same design at 94 % of slices placed for
 - the design is built at 31/15 (103.3 MHz), then
   `ise/refreq.sh` changes only the DCM multiplier/divider of the placed and
   routed design (through XDL): the same placement measured at several
-  frequencies, and the shipped one re-clocked to 16/7 (`prom` also writes the
+  frequencies, and the shipped one re-clocked to 2/1 (`prom` also writes the
   PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
   the same ratio; the ESP32 driver scans for the baud rate if 921600 gets no
   answer, so any re-clocked bitstream works.
@@ -146,8 +149,8 @@ Inside the VM:
 
 ```bash
 # part, units, Area, DCM mul/div, tag, PAR input period (ns), seed, host link, display, round
-bash ise/build.sh xc3s500e-fg320-4 5 Area 31 15 mybuild 22.94 3 uart nodisplay plain
-bash ise/refreq.sh 16 7 mybuild114 /tmp/nexys2-build/miner_top.ncd prom  # re-clock to 114.3 MHz
+bash ise/build.sh xc3s500e-fg320-4 6 Area 31 15 mybuild 22.94 5 uart nodisplay plain
+bash ise/refreq.sh 2 1 mybuild100 /tmp/nexys2-build/miner_top.ncd prom   # re-clock to 100 MHz
 # -> ise/out/mybuild.bit (JTAG) and ise/out/mybuild.svf (PROM)
 ```
 
@@ -204,6 +207,7 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-3.39 -> 3.48 -> 4.10 -> 4.61 -> **4.68 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
+3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> **4.92 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
 carry-save arithmetic, shared constants and control, pass 1's hash in block
-RAM for a fifth unit, and a lot of placement experiments.
+RAM, then smaller adders and the ESP32 doing the per-job sums for a fifth
+and a sixth unit, and a lot of placement experiments.
