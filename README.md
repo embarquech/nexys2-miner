@@ -11,8 +11,8 @@ pushing a 2007 FPGA as far as it goes, not about earning anything.
 
 | | |
 |---|---|
-| Hash rate | **5.23 MH/s** (6 units x 106.25 MHz / 122 clocks per nonce) |
-| Error rate | 0 wrong hashes in 3000 checked over 10 minutes (every hit is re-hashed by the ESP32) |
+| Hash rate | **5.25 MH/s** (6 units x 106.67 MHz / 122 clocks per nonce) |
+| Error rate | 0 wrong hashes in 2000 checked over 10 minutes (every hit is re-hashed by the ESP32) |
 | Device use | 99 % of slices, 88 % of LUTs, 13 of 20 block RAMs |
 | Boots from | the on-board XCF04S Platform Flash, mode jumper on ROM |
 
@@ -76,16 +76,20 @@ per clock, **122 clocks per nonce**:
 
 ### Clock
 
-The core clock comes from a DCM: 50 MHz x 17 / 8 = **106.25 MHz**. The timing
-tools only guarantee 76.7 MHz worst case (slowest silicon, 85 degC); the real
-chip at room temperature runs it without errors. Six units fill the chip
+The core clock comes from a DCM: 50 MHz x 32 / 15 = **106.67 MHz**. The timing
+tools only guarantee 78.5 MHz worst case (slowest silicon, 85 degC); the real
+chip at room temperature runs it without errors. PAR runs at high effort with
+extra effort (`PAROPT="-ol high -xe n"`): the same design and seed at the
+default effort placed for 76.7 MHz and held 106.25 MHz. Six units fill the chip
 (99 % of slices), so they run slower than five, but the sixth more than pays
 for it, and every LUT freed or placement constraint dropped still shows:
 
 | Build | Clock | Wrong hashes (2 min) | Useful rate |
 |---|---|---|---|
-| 6 units, free-running datapath | 103.3 - **106.25 MHz** | **0** (and 0 in 3000 over 10 min) | 5.08 - **5.23 MH/s** |
-| 6 units, free-running datapath | 107.1 / 108.3 / 110 MHz | 1 / 2 / 4 | not kept |
+| 6 units, PAR high + extra effort | **106.67 MHz** | **0** (0 in 2000 over 10 min) | **5.25 MH/s** |
+| 6 units, PAR high + extra effort | 107.1 MHz | 0 in 2 min, but 5 in 3000 over 10 min | not kept |
+| 6 units, free-running datapath, PAR standard effort | 103.3 - 106.25 MHz | 0 (0 in 3000 over 10 min) | 5.08 - 5.23 MH/s |
+| 6 units, free-running datapath, PAR standard effort | 107.1 / 108.3 / 110 MHz | 1 / 2 / 4 | not kept |
 | 6 units, schedule in block RAM (8214 LUTs) | 103.3 MHz | ~1 % | ~5.03 MH/s |
 | 6 units, schedule in SRL16s (8554 LUTs) | 103.3 MHz | ~7 % | ~4.74 MH/s |
 | 6 units, schedule in SRL16s | 100 MHz | 0 | 4.92 MH/s |
@@ -105,7 +109,7 @@ Two tricks get there:
 - the design is built at 31/15 (103.3 MHz), then
   `ise/refreq.sh` changes only the DCM multiplier/divider of the placed and
   routed design (through XDL): the same placement measured at several
-  frequencies, and the shipped one re-clocked to 17/8 (`prom` also writes
+  frequencies, and the shipped one re-clocked to 32/15 (`prom` also writes
   the PROM file). The UART divider still assumes 103.3 MHz, so the link runs at
   the same ratio; the ESP32 driver scans for the baud rate if 921600 gets no
   answer, so any re-clocked bitstream works.
@@ -164,8 +168,8 @@ Inside the VM:
 
 ```bash
 # part, units, Area, DCM mul/div, tag, PAR input period (ns), seed, host link, display, round
-bash ise/build.sh xc3s500e-fg320-4 6 Area 31 15 mybuild 22.94 5 uart nodisplay plain
-bash ise/refreq.sh 17 8 mybuild106 /tmp/nexys2-build/miner_top.ncd prom  # re-clock to 106.25 MHz
+PAROPT="-ol high -xe n" bash ise/build.sh xc3s500e-fg320-4 6 Area 31 15 mybuild 22.94 5 uart nodisplay plain
+bash ise/refreq.sh 32 15 mybuild107 /tmp/nexys2-build/miner_top.ncd prom  # re-clock to 106.67 MHz
 # -> ise/out/mybuild.bit (JTAG) and ise/out/mybuild.svf (PROM)
 ```
 
@@ -216,6 +220,12 @@ without the board.
   hashes on the board where the shipped design failed ~1 %.
 - **Forbidding XST to share adders** (to keep muxes out of the round): +450
   LUTs, and slower.
+- **Fewer muxes** (W2/W3 through the hash RAM's port A, W1/W2 written into the
+  schedule ring): -340 LUTs, but wrong hashes already at 103.3 MHz.
+- **The carry-save round with six units**, even with those LUTs saved: 111 %
+  of slices.
+- **More PAR seeds** of the shipped design (1, 3, 7, 9, 11): all worse than
+  seed 5 at 107.1 MHz (3 to 77 wrong hashes in 2 minutes).
 - **A 2-stage pipeline** (two nonces interleaved per core): doubles the state
   registers, no room.
 - **Above 106.25 MHz**: the first wrong hashes appear at 107.1 MHz (see
@@ -230,7 +240,7 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> 4.92 -> 5.08 -> **5.23 MH/s**
+3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> 4.92 -> 5.08 -> 5.23 -> **5.25 MH/s**
 
 Four units instead of three, a DCM, folding and skipping rounds, carry-save
 arithmetic, shared constants and control; then pass 1's hash in block RAM,

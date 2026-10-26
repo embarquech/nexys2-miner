@@ -33,6 +33,9 @@ HYBRID=FALSE
 [ "$ROUND" = plain ] && CSA=FALSE
 [ "$ROUND" = hybrid ] && HYBRID=TRUE
 FLOORPLAN=${12:-}
+# PAR effort: the environment variable PAROPT is passed to par as is, e.g.
+# PAROPT="-ol high -xe n" (default effort is "std")
+PAROPT=${PAROPT:-}
 [ "${10:-display}" = nodisplay ] && SHOW_RATE=FALSE
 HOST_UART=FALSE
 [ "$HOST" = uart ] && HOST_UART=TRUE
@@ -78,7 +81,7 @@ step() { echo "== $*"; "$@" > "$1.log" 2>&1 || { tail -40 "$1.log"; cp ./*.log .
 step xst      -ifn miner.xst -ofn miner_top.syr
 step ngdbuild -uc nexys2.ucf -p "$PART" miner_top.ngc miner_top.ngd
 step map      -w $MAPOPT -p "$PART" -o miner_top_map.ncd miner_top.ngd miner_top.pcf
-step par      -w -t $SEED miner_top_map.ncd miner_top.ncd miner_top.pcf
+step par      -w $PAROPT -t $SEED miner_top_map.ncd miner_top.ncd miner_top.pcf
 step trce     -v 3 -o miner_top.twr miner_top.ncd miner_top.pcf
 step bitgen   -w -g StartUpClk:JtagClk miner_top.ncd miner_top.bit
 cp miner_top.ncd miner_prom.ncd
