@@ -146,6 +146,9 @@ JA pins see a signal; a missing common ground was the first failure here.
 
 ## Building the FPGA
 
+The exact steps and parameters for the shipped bitstream are in
+[`REBUILD.md`](REBUILD.md).
+
 ISE 14.7 is required (Vivado does not support the Spartan-3E). AMD now only
 offers it as a VirtualBox VM ("ISE 14.7 Windows 10 and Windows 11"). Notes for
 that VM under Windows 11 with Hyper-V/VBS active:
