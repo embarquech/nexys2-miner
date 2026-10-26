@@ -267,6 +267,10 @@ uint8_t NEXYS2_init(GlobalState * GLOBAL_STATE)
     stride = (st_ok && st >= ncores) ? st : ncores;
     GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count = ncores;
     GLOBAL_STATE->DEVICE_CONFIG.family.asic.small_core_count = ncores;
+    // The power task computed this with the default unit count, before the
+    // FPGA was found; GH/s
+    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate =
+        GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value * ncores / NEXYS2_CYCLES_PER_NONCE / 1000.0;
     short_job = id[0] == MAGIC_SHORT;
     ESP_LOGI(TAG, "Nexys2 FPGA miner found, %u hashing units, nonce stride %u", ncores, stride);
 
