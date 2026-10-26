@@ -5,9 +5,9 @@ A SHA-256d (Bitcoin-style) miner for the **Digilent Nexys2** board
 [ESP-Miner](https://github.com/bitaxeorg/ESP-Miner), the Bitaxe firmware, so the
 board shows up in AxeOS like any Bitaxe: pool setup, hashrate, shares.
 
-It mines for real: it has had shares accepted by a pool. It is also ~300,000
-times slower than a single Bitaxe Gamma, so this is a project about pushing a
-2007 FPGA as far as it goes, not about earning anything.
+It mines for real: it has had shares accepted by a pool. It is also ~230,000
+times slower than a single Bitaxe Gamma (1.2 TH/s), so this is a project about
+pushing a 2007 FPGA as far as it goes, not about earning anything.
 
 | | |
 |---|---|
@@ -19,7 +19,7 @@ times slower than a single Bitaxe Gamma, so this is a project about pushing a
 ## How it works
 
 ```
-pool <-stratum-> ESP32-S3 (ESP-Miner + nexys2 driver) <-UART 921600-> FPGA
+pool <-stratum-> ESP32-S3 (ESP-Miner + nexys2 driver) <-UART ~1 Mbaud-> FPGA
                   midstate, rounds 0-2 precomputed          6 hashing units
                   re-hashes every hit                         sha256_core
 ```
@@ -48,7 +48,7 @@ per clock, **122 clocks per nonce**:
   `a` and `e`, written raw into a block RAM as they leave the last rounds;
   pass 2 reads them back into a register and adds the midstate word there,
   one adder per unit. This replaced a 256-bit register, six adders and a word
-  mux per unit, and is what made room for a fifth unit;
+  mux per unit, and is what made room for a fifth and a sixth unit;
 - the hit test (20 zero bits of H7 = IV7 + h7) is two constant compares on
   h7 instead of a 24-bit adder;
 - the round has two carry chains for `a` (T1, then T1 + T2), ~250 LUTs per
@@ -110,9 +110,10 @@ Two tricks get there:
   the same ratio; the ESP32 driver scans for the baud rate if 921600 gets no
   answer, so any re-clocked bitstream works.
 
-PAR seeds matter: on the same design, the wrong-hash rate at 103 MHz ranged
-from 0 % to 33 % depending on the seed. The shipped bitstream is the best of
-several (77.6 MHz worst case per the timing report, 0 wrong hashes at 103 MHz).
+PAR seeds matter as much as the design: three seeds of the same 6-unit
+design gave 1 %, 2 % and 8 % wrong hashes at 103.3 MHz, with nearly the same
+reported worst case. The shipped bitstream is the best seed of the best
+design; [`REBUILD.md`](REBUILD.md) has the exact recipe.
 
 ## Repository
 
@@ -128,7 +129,8 @@ several (77.6 MHz worst case per the timing report, 0 wrong hashes at 103 MHz).
 
 ## Hardware
 
-- Digilent Nexys2 with the **XC3S500E** (the 1200E version would fit ~8 units).
+- Digilent Nexys2 with the **XC3S500E** (the 1200E version has 2.6 times the
+  logic: ~15 units).
 - ESP32-S3 **DevKitC-1 N16R8** (ESP-Miner needs the 16 MB flash and the PSRAM).
 - Three wires, all 3.3 V, no level shifter:
 
@@ -168,7 +170,8 @@ bash ise/refreq.sh 17 8 mybuild106 /tmp/nexys2-build/miner_top.ncd prom  # re-cl
 ```
 
 `depp` instead of `uart` builds the USB variant for the Python host. The chip
-cannot hold both links, nor the 7-segment display next to the carry-save core.
+cannot hold both links, nor the 7-segment display (~150 slices) next to six
+units; `display` builds take fewer units.
 
 ## Loading it (Windows, Digilent Adept Runtime installed)
 
@@ -203,13 +206,20 @@ without the board.
 
 ## What did not work
 
-- **5 units with the carry-save round**: 103 % of slices. **Floorplanning** each unit into its own region: logic
-  of different area groups never shares a slice, which costs ~190 slices
-  (104-105 %), whatever the region shapes.
+- **A seventh unit**: ~9,450 LUTs, more than the chip has (9,312).
+- **5 units with the carry-save round**: 103 % of slices.
+- **Floorplanning** each unit into its own region: logic of different area
+  groups never shares a slice, which costs ~190 slices (104-105 %), whatever
+  the region shapes.
+- **Registering every load select a clock ahead**: the tools reported a better
+  worst case (up to 80.3 MHz), but every placement of it failed 30-45 % of
+  hashes on the board where the shipped design failed ~1 %.
+- **Forbidding XST to share adders** (to keep muxes out of the round): +450
+  LUTs, and slower.
 - **A 2-stage pipeline** (two nonces interleaved per core): doubles the state
   registers, no room.
-- **Above 106.25 MHz**: wrong hashes eat the gain (see Clock); on older
-  builds 25 % at 110 MHz, 79 % at 115 MHz.
+- **Above 106.25 MHz**: the first wrong hashes appear at 107.1 MHz (see
+  Clock), and an unstable miner is not worth the 1-3 %.
 - **Chaining pass 2 onto pass 1's last round** (121 clocks): pass 2's first
   state needs pass 1's last `a` plus the midstate plus a constant, two more
   adder levels on the path that already sets the clock: -10 % clock for
@@ -220,7 +230,12 @@ without the board.
 ## History
 
 1.1 -> 1.48 -> 1.79 -> 2.07 -> 2.40 -> 2.79 -> 2.88 -> 3.00 -> 3.20 -> 3.36 ->
-3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> 4.92 -> 5.08 -> **5.23 MH/s**: four units instead of three, a DCM, folding and skipping rounds,
-carry-save arithmetic, shared constants and control, pass 1's hash in block
-RAM, then smaller adders and the ESP32 doing the per-job sums for a fifth
-and a sixth unit, and a lot of placement experiments.
+3.39 -> 3.48 -> 4.10 -> 4.61 -> 4.68 -> 4.92 -> 5.08 -> **5.23 MH/s**
+
+Four units instead of three, a DCM, folding and skipping rounds, carry-save
+arithmetic, shared constants and control; then pass 1's hash in block RAM,
+smaller adders and the ESP32 doing the per-job sums for a fifth and a sixth
+unit; then the message schedule in block RAM and a datapath without clock
+enables to win back placement at 99 % of slices; and a lot of placement
+experiments, every one decided on the board rather than by the timing
+report.
